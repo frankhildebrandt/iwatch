@@ -12,6 +12,7 @@ import (
 	"github.com/stackriot/iwatch/internal/config"
 )
 
+// Command describes a runnable command discovered from config or project files.
 type Command struct {
 	ID     string
 	Title  string
@@ -20,11 +21,13 @@ type Command struct {
 	Source string
 }
 
+// Result contains the discovered commands and selected default command ID.
 type Result struct {
 	Commands []Command
 	Default  string
 }
 
+// Discover combines configured commands with auto-detected project commands.
 func Discover(baseDir string, cfg config.Config) (Result, error) {
 	commands := map[string]Command{}
 	order := []string{}

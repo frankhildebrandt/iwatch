@@ -6,7 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os/exec"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -14,6 +16,7 @@ import (
 	"github.com/stackriot/iwatch/internal/detect"
 )
 
+// EventType identifies the kind of process event emitted by Runner.
 type EventType string
 
 const (
@@ -23,6 +26,7 @@ const (
 	EventError   EventType = "error"
 )
 
+// Event describes one lifecycle or output event from the running command.
 type Event struct {
 	Type   EventType
 	Source string
@@ -32,6 +36,7 @@ type Event struct {
 	PID    int
 }
 
+// Runner manages starting, stopping, and streaming a single command at a time.
 type Runner struct {
 	mu      sync.Mutex
 	cmd     *exec.Cmd
@@ -41,6 +46,7 @@ type Runner struct {
 	done    chan struct{}
 }
 
+// New creates an idle runner.
 func New() *Runner {
 	return &Runner{
 		events: make(chan Event, 256),
@@ -48,10 +54,12 @@ func New() *Runner {
 	}
 }
 
+// Events returns the runner event stream.
 func (r *Runner) Events() <-chan Event {
 	return r.events
 }
 
+// Start launches the provided command.
 func (r *Runner) Start(command detect.Command) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -91,6 +99,7 @@ func (r *Runner) Start(command detect.Command) error {
 	return nil
 }
 
+// Restart stops any active command before starting the next one.
 func (r *Runner) Restart(command detect.Command) error {
 	if err := r.Stop(2 * time.Second); err != nil {
 		return err
@@ -98,6 +107,7 @@ func (r *Runner) Restart(command detect.Command) error {
 	return r.Start(command)
 }
 
+// Stop requests process termination and escalates to SIGKILL after the timeout.
 func (r *Runner) Stop(timeout time.Duration) error {
 	r.mu.Lock()
 	if !r.running || r.cmd == nil {
@@ -126,6 +136,7 @@ func (r *Runner) Stop(timeout time.Duration) error {
 	}
 }
 
+// Running reports whether a command is currently active.
 func (r *Runner) Running() bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -133,12 +144,24 @@ func (r *Runner) Running() bool {
 }
 
 func (r *Runner) stream(source string, reader io.Reader) {
-	scanner := bufio.NewScanner(reader)
-	for scanner.Scan() {
-		r.events <- Event{Type: EventOutput, Source: source, Text: scanner.Text()}
-	}
-	if err := scanner.Err(); err != nil {
+	bufferedReader := bufio.NewReader(reader)
+	for {
+		line, err := bufferedReader.ReadString('\n')
+		if len(line) > 0 {
+			r.events <- Event{
+				Type:   EventOutput,
+				Source: source,
+				Text:   strings.TrimRight(line, "\r\n"),
+			}
+		}
+		if err == nil {
+			continue
+		}
+		if errors.Is(err, io.EOF) || errors.Is(err, fs.ErrClosed) {
+			return
+		}
 		r.events <- Event{Type: EventError, Source: source, Err: err}
+		return
 	}
 }
 

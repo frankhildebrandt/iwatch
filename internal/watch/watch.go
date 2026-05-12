@@ -10,11 +10,13 @@ import (
 	"github.com/fsnotify/fsnotify"
 )
 
+// Event describes one filesystem notification emitted by Watcher.
 type Event struct {
 	Path string
 	Op   fsnotify.Op
 }
 
+// Watcher recursively watches a directory tree and debounces emitted events.
 type Watcher struct {
 	root   string
 	events chan Event
@@ -22,6 +24,7 @@ type Watcher struct {
 	fs     *fsnotify.Watcher
 }
 
+// New creates a recursive watcher rooted at the provided path.
 func New(root string) (*Watcher, error) {
 	fsWatcher, err := fsnotify.NewWatcher()
 	if err != nil {
@@ -40,14 +43,17 @@ func New(root string) (*Watcher, error) {
 	return w, nil
 }
 
+// Events returns the debounced event stream.
 func (w *Watcher) Events() <-chan Event {
 	return w.events
 }
 
+// Errors returns watcher errors reported by fsnotify.
 func (w *Watcher) Errors() <-chan error {
 	return w.errors
 }
 
+// Run forwards fsnotify events until the context is canceled.
 func (w *Watcher) Run(ctx context.Context, debounce time.Duration) {
 	timer := time.NewTimer(time.Hour)
 	if !timer.Stop() {
