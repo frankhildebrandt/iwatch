@@ -54,6 +54,49 @@ func TestResolveConfigExplicitPath(t *testing.T) {
 	}
 }
 
+func TestResolveProjectConfigPathPrefersProjectFiles(t *testing.T) {
+	base := t.TempDir()
+	projectPath := filepath.Join(base, ".iwatch", "config.json")
+	if err := os.MkdirAll(filepath.Dir(projectPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mustWrite(t, projectPath, `{}`)
+
+	got := ResolveProjectConfigPath(base, filepath.Join(t.TempDir(), "config.json"))
+	if got != projectPath {
+		t.Fatalf("project path = %s", got)
+	}
+}
+
+func TestSaveWritesNormalizedProjectConfig(t *testing.T) {
+	base := t.TempDir()
+	path := filepath.Join(base, ".iwatch", "config.json")
+	cfg := Config{
+		UI: UIConfig{
+			Presets: []FilterPreset{{ID: "ops", Title: "Ops"}},
+		},
+	}
+
+	if err := Save(path, cfg); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+
+	loaded, ok, err := loadFile(path)
+	if err != nil {
+		t.Fatalf("loadFile() error = %v", err)
+	}
+	if !ok {
+		t.Fatal("expected saved file to exist")
+	}
+	loaded = DefaultMerge(loaded)
+	if loaded.UI.ActivePreset != "ops" {
+		t.Fatalf("active preset = %q", loaded.UI.ActivePreset)
+	}
+	if loaded.UI.LogView.TimeFormat != "time" || loaded.UI.LogView.WrapMode != "off" {
+		t.Fatalf("unexpected log view defaults: %+v", loaded.UI.LogView)
+	}
+}
+
 func mustWrite(t *testing.T, path, content string) {
 	t.Helper()
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {

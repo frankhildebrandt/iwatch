@@ -27,10 +27,11 @@ func Run(args []string) error {
 				return fmt.Errorf("resolve working directory: %w", err)
 			}
 
-			cfg, _, err := config.ResolveConfig(wd, overrides)
+			cfg, usedPath, err := config.ResolveConfig(wd, overrides)
 			if err != nil {
 				return err
 			}
+			projectConfigPath := config.ResolveProjectConfigPath(wd, usedPath)
 
 			discovered, err := detect.Discover(wd, cfg)
 			if err != nil {
@@ -64,7 +65,7 @@ func Run(args []string) error {
 				return fmt.Errorf("start watcher: %w", err)
 			}
 
-			return tui.Run(cfg, discovered.Commands, defaultCommand, logBuffer, run, watcher)
+			return tui.Run(cfg, projectConfigPath, discovered.Commands, defaultCommand, logBuffer, run, watcher)
 		},
 	}
 
