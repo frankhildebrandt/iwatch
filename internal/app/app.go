@@ -22,7 +22,7 @@ func Run(args []string) error {
 	root := &cobra.Command{
 		Use:   "iwatch",
 		Short: "Interactive watch tool for build and run workflows",
-		RunE: func(cmd *cobra.Command, _ []string) error {
+		RunE: func(cmd *cobra.Command, args []string) error {
 			wd, err := os.Getwd()
 			if err != nil {
 				return fmt.Errorf("resolve working directory: %w", err)
@@ -45,6 +45,9 @@ func Run(args []string) error {
 			defaultCommand := discovered.Default
 			if overrides.CommandID != "" {
 				defaultCommand = overrides.CommandID
+			}
+			if overrides.CommandID == "" {
+				discovered.Commands, defaultCommand = resolvePositionalCommand(wd, discovered.Commands, defaultCommand, args)
 			}
 
 			watchPath := cfg.WatchPath

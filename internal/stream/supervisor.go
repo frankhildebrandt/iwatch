@@ -27,7 +27,7 @@ type Supervisor struct {
 	configs  map[string]config.StreamConfig
 	order    []string
 	active   map[string]struct{}
-	workers  map[string]worker
+	workers  map[string]*worker
 	manual   map[string]struct{}
 	errors   map[string]string
 	events   chan Event
@@ -40,7 +40,7 @@ func New(streams []config.StreamConfig, baseDir string) *Supervisor {
 		baseDir: baseDir,
 		configs: make(map[string]config.StreamConfig, len(streams)),
 		active:  make(map[string]struct{}),
-		workers: make(map[string]worker),
+		workers: make(map[string]*worker),
 		manual:  make(map[string]struct{}),
 		errors:  make(map[string]string),
 		events:  make(chan Event, 256),
@@ -150,16 +150,22 @@ func (s *Supervisor) Start(id string) error {
 		return nil
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	s.workers[id] = worker{cancel: cancel}
+	running := &worker{
+		cancel: cancel,
+		done:   make(chan struct{}),
+		stop:   make(chan time.Duration, 1),
+		force:  make(chan struct{}, 1),
+	}
+	s.workers[id] = running
 	s.manual[id] = struct{}{}
 	delete(s.errors, id)
 	s.mu.Unlock()
 
 	switch cfg.Type {
 	case "process":
-		go s.runProcess(ctx, cfg)
+		go s.runProcess(ctx, cfg, running)
 	default:
-		go s.runFile(ctx, cfg)
+		go s.runFile(ctx, cfg, running)
 	}
 	return nil
 }
@@ -168,13 +174,13 @@ func (s *Supervisor) Start(id string) error {
 func (s *Supervisor) Stop(id string) error {
 	s.mu.Lock()
 	running, ok := s.workers[id]
-	if ok {
-		delete(s.workers, id)
-	}
 	delete(s.manual, id)
 	s.mu.Unlock()
 	if ok {
-		running.cancel()
+		select {
+		case running.stop <- 30 * time.Second:
+		default:
+		}
 	}
 	return nil
 }
@@ -183,14 +189,77 @@ func (s *Supervisor) Stop(id string) error {
 func (s *Supervisor) StopAll() {
 	s.mu.Lock()
 	s.stopping = true
-	var workers []worker
+	var workers []*worker
 	for id, running := range s.workers {
 		workers = append(workers, running)
 		delete(s.workers, id)
 	}
 	s.mu.Unlock()
 	for _, running := range workers {
-		running.cancel()
+		select {
+		case running.stop <- 30 * time.Second:
+		default:
+		}
+	}
+	for _, running := range workers {
+		<-running.done
+	}
+}
+
+// RunningIDs returns the ids of streams that are currently running.
+func (s *Supervisor) RunningIDs() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	ids := make([]string, 0, len(s.workers))
+	for _, id := range s.order {
+		if _, ok := s.workers[id]; ok {
+			ids = append(ids, id)
+		}
+	}
+	return ids
+}
+
+// RequestStopAll asks every running stream to stop and returns a channel that
+// closes once they have exited.
+func (s *Supervisor) RequestStopAll(timeout time.Duration) <-chan struct{} {
+	s.mu.Lock()
+	workers := make([]*worker, 0, len(s.workers))
+	for _, running := range s.workers {
+		workers = append(workers, running)
+	}
+	s.mu.Unlock()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for _, running := range workers {
+			select {
+			case running.stop <- timeout:
+			default:
+			}
+		}
+		for _, running := range workers {
+			<-running.done
+		}
+	}()
+	return done
+}
+
+// ForceStopAll immediately terminates all running process streams.
+func (s *Supervisor) ForceStopAll() {
+	s.mu.Lock()
+	workers := make([]*worker, 0, len(s.workers))
+	for _, running := range s.workers {
+		workers = append(workers, running)
+	}
+	s.mu.Unlock()
+
+	for _, running := range workers {
+		select {
+		case running.force <- struct{}{}:
+		default:
+		}
 	}
 }
 
@@ -224,10 +293,19 @@ func (s *Supervisor) ActiveCount() int {
 	return len(s.workers)
 }
 
-func (s *Supervisor) runFile(ctx context.Context, cfg config.StreamConfig) {
-	defer s.markStopped(cfg.ID)
+func (s *Supervisor) runFile(ctx context.Context, cfg config.StreamConfig, running *worker) {
+	defer s.markStopped(cfg.ID, running)
 	ticker := time.NewTicker(200 * time.Millisecond)
 	defer ticker.Stop()
+	go func() {
+		select {
+		case <-running.stop:
+			running.cancel()
+		case <-running.force:
+			running.cancel()
+		case <-running.done:
+		}
+	}()
 
 	states := map[string]fileState{}
 	source := s.resolvePath(cfg.Source)
@@ -325,9 +403,9 @@ func (s *Supervisor) readNewLines(ctx context.Context, cfg config.StreamConfig, 
 	}
 }
 
-func (s *Supervisor) runProcess(ctx context.Context, cfg config.StreamConfig) {
-	defer s.markStopped(cfg.ID)
-	cmd := exec.CommandContext(ctx, "sh", "-lc", cfg.Cmd)
+func (s *Supervisor) runProcess(ctx context.Context, cfg config.StreamConfig, running *worker) {
+	defer s.markStopped(cfg.ID, running)
+	cmd := exec.Command("sh", "-lc", cfg.Cmd)
 	cmd.Dir = s.resolvePath(cfg.CWD)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
@@ -346,7 +424,7 @@ func (s *Supervisor) runProcess(ctx context.Context, cfg config.StreamConfig) {
 		return
 	}
 	s.events <- Event{Type: EventStarted, StreamID: cfg.ID, Source: cfg.ID, Text: cfg.Cmd, PID: cmd.Process.Pid}
-	go terminateProcessGroup(ctx, cmd.Process.Pid)
+	go terminateProcessGroup(ctx, running, cmd.Process.Pid)
 
 	go s.streamReader(ctx, cfg.ID, cfg.ID+":stdout", stdout)
 	go s.streamReader(ctx, cfg.ID, cfg.ID+":stderr", stderr)
@@ -389,10 +467,14 @@ func (s *Supervisor) streamReader(ctx context.Context, streamID string, source s
 	}
 }
 
-func (s *Supervisor) markStopped(id string) {
+func (s *Supervisor) markStopped(id string, running *worker) {
 	s.mu.Lock()
-	delete(s.workers, id)
+	if current, ok := s.workers[id]; ok && current == running {
+		delete(s.workers, id)
+	}
 	s.mu.Unlock()
+	close(running.done)
+	running.cancel()
 }
 
 func (s *Supervisor) recordError(id string, err error) {
@@ -423,9 +505,21 @@ func autoStart(cfg config.StreamConfig) bool {
 	return cfg.AutoStart == nil || *cfg.AutoStart
 }
 
-func terminateProcessGroup(ctx context.Context, pid int) {
-	<-ctx.Done()
-	_ = syscall.Kill(-pid, syscall.SIGTERM)
-	time.Sleep(time.Second)
-	_ = syscall.Kill(-pid, syscall.SIGKILL)
+func terminateProcessGroup(ctx context.Context, running *worker, pid int) {
+	select {
+	case timeout := <-running.stop:
+		_ = syscall.Kill(-pid, syscall.SIGTERM)
+		select {
+		case <-running.done:
+		case <-running.force:
+			_ = syscall.Kill(-pid, syscall.SIGKILL)
+		case <-time.After(timeout):
+			_ = syscall.Kill(-pid, syscall.SIGKILL)
+		case <-ctx.Done():
+		}
+	case <-running.force:
+		_ = syscall.Kill(-pid, syscall.SIGKILL)
+	case <-ctx.Done():
+	case <-running.done:
+	}
 }

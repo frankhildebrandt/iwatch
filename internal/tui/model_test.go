@@ -1309,6 +1309,113 @@ func TestOnDemandProcessStreamStartsFromPane(t *testing.T) {
 	}
 }
 
+func TestAutoStartProcessStreamStartsWithoutPresetStreamList(t *testing.T) {
+	cfg := config.Default()
+	cfg.Streams = []config.StreamConfig{{ID: "dev", Title: "React Dev", Type: "process", Cmd: "sleep 10"}}
+	cfg = config.DefaultMerge(cfg)
+
+	buf, err := buffer.New(100, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	streams := stream.New(cfg.Streams, t.TempDir())
+	defer streams.StopAll()
+
+	app := NewWithStreams(cfg, "", []detect.Command{{ID: "cmd", Title: "Cmd", Cmd: "echo hi"}}, "cmd", buf, runner.New(), streams, nil)
+	app.applyActiveStreams()
+
+	if got := streams.ActiveCount(); got != 1 {
+		t.Fatalf("active streams = %d, want 1", got)
+	}
+}
+
+func TestCommandPaneEnterStartsCommandOutputPane(t *testing.T) {
+	cfg := config.Default()
+
+	buf, err := buffer.New(100, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	streams := stream.New(nil, t.TempDir())
+	defer streams.StopAll()
+
+	commands := []detect.Command{
+		{ID: "first", Title: "First", Cmd: "echo first"},
+		{ID: "second", Title: "Second", Cmd: "echo second"},
+	}
+
+	app := NewWithStreams(cfg, "", commands, "first", buf, runner.New(), streams, nil)
+
+	model, _ := app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
+	app = model.(*App)
+	if app.focus != paneCommand {
+		t.Fatalf("focus = %s, want %s", app.focus, paneCommand)
+	}
+
+	model, _ = app.Update(tea.KeyMsg{Type: tea.KeyDown})
+	app = model.(*App)
+	if command, ok := app.commandPane.SelectedCommand(); !ok || command.ID != "second" {
+		t.Fatalf("selected command = %#v, ok=%v, want second", command, ok)
+	}
+
+	model, _ = app.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	app = model.(*App)
+	if got, want := app.focus, paneCommandOutput; got != want {
+		t.Fatalf("focus = %s, want %s", got, want)
+	}
+	if !app.commandOutputPane.IsOpen() {
+		t.Fatal("expected command output pane to be open")
+	}
+	if got, want := app.commandOutputPane.StreamID(), "cmd-panel:second"; got != want {
+		t.Fatalf("command output stream id = %q, want %q", got, want)
+	}
+	if got, want := streams.ActiveCount(), 1; got != want {
+		t.Fatalf("active stream count = %d, want %d", got, want)
+	}
+	if got, want := app.activeCmd, "first"; got != want {
+		t.Fatalf("active command = %q, want %q", got, want)
+	}
+}
+
+func TestCommandPaneOStartsCommandAsStream(t *testing.T) {
+	cfg := config.Default()
+
+	buf, err := buffer.New(100, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	streams := stream.New(nil, t.TempDir())
+	defer streams.StopAll()
+
+	commands := []detect.Command{
+		{ID: "first", Title: "First", Cmd: "echo first"},
+		{ID: "second", Title: "Second", Cmd: "echo second"},
+	}
+
+	app := NewWithStreams(cfg, "", commands, "first", buf, runner.New(), streams, nil)
+
+	model, _ := app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
+	app = model.(*App)
+	model, _ = app.Update(tea.KeyMsg{Type: tea.KeyDown})
+	app = model.(*App)
+	model, _ = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'o'}})
+	app = model.(*App)
+
+	if got, want := app.focus, paneStreams; got != want {
+		t.Fatalf("focus = %s, want %s", got, want)
+	}
+	if !app.streamsPane.IsOpen() {
+		t.Fatal("expected streams pane to be open")
+	}
+	if got, want := streams.ActiveCount(), 1; got != want {
+		t.Fatalf("active stream count = %d, want %d", got, want)
+	}
+	if _, ok := app.runtimeStreams["cmd-stream:second"]; !ok {
+		t.Fatal("expected runtime command stream to be registered")
+	}
+}
+
 func sameTUIStrings(left, right []string) bool {
 	if len(left) != len(right) {
 		return false

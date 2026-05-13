@@ -93,7 +93,7 @@ func (p *LogPane) View(width, height int, focused bool, lines []buffer.ViewLine,
 // InputBar renders the current help and query bar below the panes.
 func (p *LogPane) InputBar() string {
 	label := "log"
-	keys := "[j/k, arrows, pgup/pgdown, ctrl+u/d, home/end/G] nav [t] truncate [v] fields [F] field filter [r] rebuild [l] streams [/] query [g] config [S] split [[]/[]] preset [tab] focus [n/N] hit [?] help [q|esc x3] quit"
+	keys := "[j/k, arrows, pgup/pgdown, ctrl+u/d, home/end/G] nav [t] truncate [v] fields [F] field filter [r] rebuild [l] streams [p] cmd output [/] query [g] config [S] split [[]/[]] preset [tab] focus [n/N] hit [?] help [q|esc x3] quit"
 	if p.queryInput.Focused() {
 		label = "query"
 		keys = "[esc] close [enter] close"

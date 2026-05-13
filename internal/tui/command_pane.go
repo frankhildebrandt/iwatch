@@ -24,7 +24,7 @@ func NewCommandPane(commands []detect.Command, openPanes []string) *CommandPane 
 	}
 
 	commandList := list.New(items, commandDelegate{}, 30, 10)
-	commandList.Title = "Commands"
+	commandList.Title = "Commands [enter] panel [o] stream"
 	commandList.SetShowHelp(false)
 	commandList.SetFilteringEnabled(true)
 

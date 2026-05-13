@@ -98,6 +98,39 @@ func TestRunnerStreamsLongOutputLine(t *testing.T) {
 	}
 }
 
+func TestRunnerForceStopTerminatesStubbornProcess(t *testing.T) {
+	run := New()
+	command := detect.Command{
+		ID:    "stubborn",
+		Title: "stubborn",
+		Cmd:   "trap '' TERM; while :; do sleep 1; done",
+		CWD:   t.TempDir(),
+	}
+
+	if err := run.Start(command); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	started := collectEvents(t, run, 1, 2*time.Second)
+	if started[0].Type != EventStarted {
+		t.Fatalf("unexpected start event: %#v", started[0])
+	}
+
+	done, err := run.RequestStop(30 * time.Second)
+	if err != nil {
+		t.Fatalf("request stop: %v", err)
+	}
+	time.Sleep(100 * time.Millisecond)
+	if err := run.ForceStop(); err != nil {
+		t.Fatalf("force stop: %v", err)
+	}
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for forced stop")
+	}
+}
+
 func collectEvents(t *testing.T, run *Runner, count int, timeout time.Duration) []Event {
 	t.Helper()
 	events := make([]Event, 0, count)

@@ -2,6 +2,7 @@ package watch
 
 import (
 	"context"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -18,10 +19,11 @@ type Event struct {
 
 // Watcher recursively watches a directory tree and debounces emitted events.
 type Watcher struct {
-	root   string
-	events chan Event
-	errors chan error
-	fs     *fsnotify.Watcher
+	root    string
+	events  chan Event
+	errors  chan error
+	fs      *fsnotify.Watcher
+	ignores *ignoreMatcher
 }
 
 // New creates a recursive watcher rooted at the provided path.
@@ -30,11 +32,19 @@ func New(root string) (*Watcher, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	ignores, err := newIgnoreMatcher(root)
+	if err != nil {
+		_ = fsWatcher.Close()
+		return nil, fmt.Errorf("load ignore rules: %w", err)
+	}
+
 	w := &Watcher{
-		root:   root,
-		events: make(chan Event, 128),
-		errors: make(chan error, 32),
-		fs:     fsWatcher,
+		root:    root,
+		events:  make(chan Event, 128),
+		errors:  make(chan error, 32),
+		fs:      fsWatcher,
+		ignores: ignores,
 	}
 	if err := w.addRecursive(root); err != nil {
 		_ = fsWatcher.Close()
@@ -86,10 +96,19 @@ func (w *Watcher) Run(ctx context.Context, debounce time.Duration) {
 			if !ok {
 				return
 			}
+			if w.isIgnoreFile(ev.Name) {
+				if err := w.reloadIgnores(); err != nil {
+					w.errors <- err
+				}
+				continue
+			}
 			if ev.Has(fsnotify.Create) {
-				if info, err := os.Stat(ev.Name); err == nil && info.IsDir() {
+				if info, err := os.Stat(ev.Name); err == nil && info.IsDir() && !w.ignores.matches(ev.Name, true) {
 					_ = w.addRecursive(ev.Name)
 				}
+			}
+			if w.shouldIgnoreEventPath(ev.Name) {
+				continue
 			}
 			pending = &Event{Path: ev.Name, Op: ev.Op}
 			timer.Reset(debounce)
@@ -107,6 +126,34 @@ func (w *Watcher) addRecursive(root string) error {
 		if !d.IsDir() {
 			return nil
 		}
+		if path != w.root && w.ignores.matches(path, true) {
+			return filepath.SkipDir
+		}
 		return w.fs.Add(path)
 	})
+}
+
+func (w *Watcher) isIgnoreFile(path string) bool {
+	return samePath(path, filepath.Join(w.root, ".gitignore")) || samePath(path, filepath.Join(w.root, ".iwatchignore"))
+}
+
+func (w *Watcher) reloadIgnores() error {
+	ignores, err := newIgnoreMatcher(w.root)
+	if err != nil {
+		return fmt.Errorf("reload ignore rules: %w", err)
+	}
+	w.ignores = ignores
+	return nil
+}
+
+func (w *Watcher) shouldIgnoreEventPath(path string) bool {
+	info, err := os.Stat(path)
+	if err == nil {
+		return w.ignores.matches(path, info.IsDir())
+	}
+	return w.ignores.matches(path, false)
+}
+
+func samePath(left string, right string) bool {
+	return filepath.Clean(left) == filepath.Clean(right)
 }

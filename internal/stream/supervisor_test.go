@@ -70,6 +70,28 @@ func TestProcessStreamEmitsOutputAndExit(t *testing.T) {
 	}
 }
 
+func TestForceStopAllTerminatesStubbornProcessStreams(t *testing.T) {
+	supervisor := New([]config.StreamConfig{{
+		ID:    "proc",
+		Title: "Proc",
+		Type:  "process",
+		Cmd:   "trap '' TERM; while :; do sleep 1; done",
+	}}, t.TempDir())
+	defer supervisor.StopAll()
+	supervisor.Apply([]string{"proc"})
+
+	waitEvent(t, supervisor, EventStarted)
+	done := supervisor.RequestStopAll(30 * time.Second)
+	time.Sleep(100 * time.Millisecond)
+	supervisor.ForceStopAll()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for forced stop")
+	}
+}
+
 func waitEvent(t *testing.T, supervisor *Supervisor, eventType EventType) Event {
 	t.Helper()
 	deadline := time.After(3 * time.Second)
