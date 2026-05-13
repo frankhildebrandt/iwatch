@@ -16,6 +16,7 @@ func (a *App) activateEditorRow(row editorRow) (tea.Model, tea.Cmd) {
 			return a, nil
 		}
 		a.cfg = a.editor.draft
+		a.applyActiveStreams()
 		a.mode = modeMain
 		a.eventsPane.Append("saved config to " + a.configPath)
 	case editorCancel:
@@ -35,6 +36,8 @@ func (a *App) activateEditorRow(row editorRow) (tea.Model, tea.Cmd) {
 	case editorRuleAdd:
 		active := activePresetPtr(&a.editor.draft)
 		active.HighlightRules = append(active.HighlightRules, config.HighlightRule{ID: "rule", Style: "warn", Priority: 50, Pattern: "(?i)warn"})
+	case editorStreamAdd:
+		a.editor.draft.Streams = append(a.editor.draft.Streams, config.StreamConfig{ID: "stream", Title: "Stream", Type: "file", Source: "app.log"})
 	case editorToggleRaw:
 		a.editor.draft.UI.LogView.ShowRawMessage = boolPtr(!boolValue(a.editor.draft.UI.LogView.ShowRawMessage))
 	case editorToggleSource:
@@ -45,6 +48,8 @@ func (a *App) activateEditorRow(row editorRow) (tea.Model, tea.Cmd) {
 		a.editor.draft.UI.LogView.TimeFormat = cycleValue(timeFormats, a.editor.draft.UI.LogView.TimeFormat, 1)
 	case editorWrapMode:
 		a.editor.draft.UI.LogView.WrapMode = cycleValue(wrapModes, a.editor.draft.UI.LogView.WrapMode, 1)
+	case editorPalette:
+		a.editor.draft.UI.LogView.Palette = cycleValue(config.LogPaletteNames(), a.editor.draft.UI.LogView.Palette, 1)
 	default:
 		return a.startEditingRow(row)
 	}
@@ -54,7 +59,7 @@ func (a *App) activateEditorRow(row editorRow) (tea.Model, tea.Cmd) {
 
 func (a *App) startEditingRow(row editorRow) (tea.Model, tea.Cmd) {
 	switch row.kind {
-	case editorPresetID, editorPresetTitle, editorClause, editorRule, editorFields:
+	case editorPresetID, editorPresetTitle, editorPresetStreams, editorClause, editorRule, editorStream, editorFields, editorHiddenFields:
 		a.editor.editing = true
 		a.editor.input.SetValue(row.value)
 		a.editor.input.CursorEnd()
@@ -85,6 +90,8 @@ func (a *App) applyEditorInput(row editorRow) {
 		if value != "" {
 			active.Title = value
 		}
+	case editorPresetStreams:
+		active.Streams = parseFields(value)
 	case editorClause:
 		clause := parseClause(value)
 		if row.index >= 0 && row.index < len(active.Clauses) {
@@ -95,8 +102,15 @@ func (a *App) applyEditorInput(row editorRow) {
 		if row.index >= 0 && row.index < len(active.HighlightRules) {
 			active.HighlightRules[row.index] = rule
 		}
+	case editorStream:
+		stream := parseStream(value)
+		if row.index >= 0 && row.index < len(a.editor.draft.Streams) {
+			a.editor.draft.Streams[row.index] = stream
+		}
 	case editorFields:
 		a.editor.draft.UI.LogView.VisibleFields = parseFields(value)
+	case editorHiddenFields:
+		a.editor.draft.UI.LogView.HiddenFields = parseFields(value)
 	}
 	a.editor.draft = config.DefaultMerge(a.editor.draft)
 }
@@ -111,6 +125,8 @@ func (a *App) addEditorItem(row editorRow) (tea.Model, tea.Cmd) {
 	case editorRule, editorRuleAdd:
 		active := activePresetPtr(&a.editor.draft)
 		active.HighlightRules = append(active.HighlightRules, config.HighlightRule{ID: "rule", Style: "warn", Priority: 50, Pattern: "(?i)warn"})
+	case editorStream, editorStreamAdd:
+		a.editor.draft.Streams = append(a.editor.draft.Streams, config.StreamConfig{ID: "stream", Title: "Stream", Type: "file", Source: "app.log"})
 	}
 	a.editor.draft = config.DefaultMerge(a.editor.draft)
 	return a, nil
@@ -126,6 +142,10 @@ func (a *App) deleteEditorItem(row editorRow) (tea.Model, tea.Cmd) {
 	case editorRule:
 		if row.index >= 0 && row.index < len(active.HighlightRules) {
 			active.HighlightRules = append(active.HighlightRules[:row.index], active.HighlightRules[row.index+1:]...)
+		}
+	case editorStream:
+		if row.index >= 0 && row.index < len(a.editor.draft.Streams) {
+			a.editor.draft.Streams = append(a.editor.draft.Streams[:row.index], a.editor.draft.Streams[row.index+1:]...)
 		}
 	case editorPresetSelect, editorPresetDelete:
 		return a.deleteActivePreset()

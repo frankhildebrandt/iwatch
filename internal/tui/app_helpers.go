@@ -12,8 +12,11 @@ import (
 	"github.com/stackriot/iwatch/internal/buffer"
 	"github.com/stackriot/iwatch/internal/config"
 	"github.com/stackriot/iwatch/internal/runner"
+	"github.com/stackriot/iwatch/internal/stream"
 	"github.com/stackriot/iwatch/internal/watch"
 )
+
+const logShortMemoryLines = 1000
 
 func (a *App) renderSidePanes(width, height int) string {
 	var parts []string
@@ -22,6 +25,9 @@ func (a *App) renderSidePanes(width, height int) string {
 	}
 	if a.eventsPane.IsOpen() {
 		parts = append(parts, a.eventsPane.View(width, height, a.focus == paneEvents))
+	}
+	if a.streamsPane.IsOpen() {
+		parts = append(parts, a.streamsPane.View(width, height, a.focus == paneStreams, a.streamStatuses()))
 	}
 	return strings.Join(parts, "\n")
 }
@@ -40,12 +46,16 @@ func (a *App) logPaneContext() logPaneContext {
 		StatusDetail:  a.statusDetail,
 		BufferLen:     a.buf.Len(),
 		BufferCap:     a.cfg.BufferLines,
+		StreamCount:   a.streamCount(),
 	}
 }
 
 func (a *App) quitCmd() tea.Cmd {
 	if a.cancelWatch != nil {
 		a.cancelWatch()
+	}
+	if a.streams != nil {
+		a.streams.StopAll()
 	}
 	_ = a.runner.Stop(1500 * time.Millisecond)
 	return tea.Quit
@@ -93,7 +103,7 @@ func (a *App) logPaneWidth() int {
 
 func (a *App) nextPane() paneID {
 	var panes []string
-	for _, pane := range []Pane{a.logPane, a.commandPane, a.eventsPane} {
+	for _, pane := range []Pane{a.logPane, a.commandPane, a.eventsPane, a.streamsPane} {
 		if pane.IsOpen() {
 			panes = append(panes, string(pane.ID()))
 		}
@@ -119,24 +129,39 @@ func (a *App) togglePane(id paneID) {
 		a.commandPane.SetOpen(!a.commandPane.IsOpen())
 	case paneEvents:
 		a.eventsPane.SetOpen(!a.eventsPane.IsOpen())
+	case paneStreams:
+		a.streamsPane.SetOpen(!a.streamsPane.IsOpen())
 	}
 }
 
 func (a *App) snapshotLines() []buffer.ViewLine {
+	if a.logWindowLimit <= 0 {
+		a.logWindowLimit = logShortMemoryLines
+	}
+	return a.snapshotLinesWithLimit(a.logWindowLimit)
+}
+
+func (a *App) snapshotLinesWithLimit(limit int) []buffer.ViewLine {
 	preset := activePreset(a.cfg)
 	highlights := preset.HighlightRules
 	if len(highlights) == 0 {
 		highlights = a.cfg.HighlightRules
 	}
 	return a.buf.Snapshot(buffer.SnapshotOptions{
-		Preset:     preset,
-		Query:      a.logPane.query,
-		Highlights: highlights,
+		Preset:       preset,
+		Query:        a.logPane.query,
+		FieldFilters: cloneFieldFilters(a.fieldFilters),
+		Highlights:   highlights,
+		Limit:        limit,
 	})
 }
 
 func (a *App) renderLine(line buffer.ViewLine, width int) string {
-	return a.logPane.renderStyledLine(line, width, false, a.cfg.UI.LogView)
+	observed := a.buf.ObservedFields()
+	if len(observed) == 0 {
+		observed = fieldsFromLine(line)
+	}
+	return a.logPane.renderStyledLine(line, width, false, observed, a.cfg.UI.LogView)
 }
 
 func (a *App) renderDetailLines() []string {
@@ -157,13 +182,85 @@ func (a *App) switchPreset(direction int) {
 	}
 	next := (current + direction + len(ids)) % len(ids)
 	a.cfg.UI.ActivePreset = ids[next]
+	a.applyActiveStreams()
+	a.resetLogWindow()
 	lines := a.snapshotLines()
 	a.logPane.refreshQueryState(true, lines)
 	a.syncLogViewport(lines)
 }
 
 func (a *App) syncLogViewport(lines []buffer.ViewLine) {
-	a.logPane.ensureCursorVisible(max(10, a.logPaneWidth()), a.bodyHeight(), lines, a.cfg.UI.LogView)
+	a.logPane.ensureCursorVisible(max(10, a.logPaneWidth()), a.bodyHeight(), lines, a.buf.ObservedFields(), a.cfg.UI.LogView)
+}
+
+func (a *App) moveLogCursor(delta int) {
+	lines := a.snapshotLines()
+	if delta < 0 && a.logPane.cursor <= 0 {
+		lines = a.expandLogWindow(lines)
+	}
+	a.logPane.selecting = true
+	a.logPane.moveCursor(delta)
+	a.logPane.syncAutoScroll(lines)
+	a.syncLogViewport(lines)
+}
+
+func (a *App) pageLogCursor(direction int) {
+	lines := a.snapshotLines()
+	if direction < 0 && a.logPane.cursor < max(1, a.logPageSize()/2) {
+		lines = a.expandLogWindow(lines)
+	}
+	a.logPane.selecting = true
+	a.logPane.pageCursor(direction, a.logPageSize())
+	a.logPane.syncAutoScroll(lines)
+	a.syncLogViewport(lines)
+}
+
+func (a *App) moveLogToTail() {
+	a.resetLogWindow()
+	lines := a.snapshotLines()
+	a.logPane.selecting = false
+	a.logPane.refreshQueryState(true, lines)
+	a.syncLogViewport(lines)
+}
+
+func (a *App) truncateLogs() {
+	a.resetLogWindow()
+	a.buf.Truncate()
+	a.buf.Append("system", "logs truncated")
+	a.moveLogToTail()
+}
+
+func (a *App) flushPendingOutput() {
+	if len(a.pendingOutput) == 0 {
+		return
+	}
+	for _, ev := range a.pendingOutput {
+		a.buf.Append(ev.Source, ev.Text)
+	}
+	a.pendingOutput = a.pendingOutput[:0]
+	if a.logPane.autoScroll {
+		a.resetLogWindow()
+	}
+	lines := a.snapshotLines()
+	a.logPane.refreshQueryState(a.logPane.autoScroll, lines)
+	a.syncLogViewport(lines)
+}
+
+func (a *App) resetLogWindow() {
+	a.logWindowLimit = logShortMemoryLines
+}
+
+func (a *App) expandLogWindow(current []buffer.ViewLine) []buffer.ViewLine {
+	if a.logWindowLimit >= a.buf.Len() {
+		return current
+	}
+
+	oldLen := len(current)
+	a.logWindowLimit = min(a.buf.Len(), max(logShortMemoryLines, a.logWindowLimit+logShortMemoryLines))
+	expanded := a.snapshotLines()
+	a.logPane.cursor += max(0, len(expanded)-oldLen)
+	a.logPane.viewportTop += max(0, len(expanded)-oldLen)
+	return expanded
 }
 
 func (a *App) switchDraftPreset(direction int) {
@@ -179,6 +276,82 @@ func (a *App) switchDraftPreset(direction int) {
 	}
 	next := (current + direction + len(a.editor.draft.UI.Presets)) % len(a.editor.draft.UI.Presets)
 	a.editor.draft.UI.ActivePreset = a.editor.draft.UI.Presets[next].ID
+}
+
+func (a *App) toggleHiddenField(field string) {
+	current := a.cfg.UI.LogView.HiddenFields
+	for idx, value := range current {
+		if value != field {
+			continue
+		}
+		a.cfg.UI.LogView.HiddenFields = append(current[:idx], current[idx+1:]...)
+		return
+	}
+	a.cfg.UI.LogView.HiddenFields = append(current, field)
+}
+
+func (a *App) setFieldFilter(field string, value string) {
+	field = strings.ToLower(strings.TrimSpace(field))
+	value = strings.ToLower(strings.TrimSpace(value))
+	if field == "" {
+		return
+	}
+	if value == "" {
+		delete(a.fieldFilters, field)
+		return
+	}
+	a.fieldFilters[field] = value
+}
+
+func (a *App) appendFieldFilterValue(field string, value string) {
+	if value == "" {
+		return
+	}
+	a.setFieldFilter(field, a.fieldFilters[field]+strings.ToLower(value))
+}
+
+func (a *App) backspaceFieldFilterValue(field string) {
+	value := a.fieldFilters[field]
+	if value == "" {
+		return
+	}
+	a.setFieldFilter(field, value[:len(value)-1])
+}
+
+func cloneFieldFilters(filters map[string]string) map[string]string {
+	if len(filters) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(filters))
+	for field, value := range filters {
+		if field == "" || value == "" {
+			continue
+		}
+		out[field] = value
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func countActiveFieldFilters(filters map[string]string) int {
+	count := 0
+	for _, value := range filters {
+		if value != "" {
+			count++
+		}
+	}
+	return count
+}
+
+func fieldsFromLine(line buffer.ViewLine) []string {
+	fields := make([]string, 0, len(line.Fields))
+	for field := range line.Fields {
+		fields = append(fields, field)
+	}
+	sortStrings(fields)
+	return fields
 }
 
 func (a *App) startInitialRun() tea.Cmd {
@@ -234,9 +407,22 @@ func waitWatchError(w *watch.Watcher) tea.Cmd {
 	}
 }
 
+func waitStreamEvent(streams *stream.Supervisor) tea.Cmd {
+	return func() tea.Msg {
+		ev := <-streams.Events()
+		return streamMsg(ev)
+	}
+}
+
 func tickCmd() tea.Cmd {
 	return tea.Tick(500*time.Millisecond, func(t time.Time) tea.Msg {
 		return tickMsg(t)
+	})
+}
+
+func outputFlushCmd() tea.Cmd {
+	return tea.Tick(75*time.Millisecond, func(t time.Time) tea.Msg {
+		return outputFlushMsg(t)
 	})
 }
 
@@ -250,6 +436,77 @@ func activePreset(cfg config.Config) config.FilterPreset {
 		return cfg.UI.Presets[0]
 	}
 	return config.FilterPreset{ID: config.DefaultPresetID, Title: "Default"}
+}
+
+func (a *App) activeStreamIDs() []string {
+	preset := activePreset(a.cfg)
+	return append([]string(nil), preset.Streams...)
+}
+
+func (a *App) applyActiveStreams() {
+	if a.streams == nil {
+		return
+	}
+	a.streams.Configure(a.cfg.Streams)
+	a.streams.Apply(a.activeStreamIDs())
+}
+
+func (a *App) streamStatuses() []stream.Status {
+	if a.streams == nil {
+		return nil
+	}
+	return a.streams.Statuses()
+}
+
+func (a *App) streamCount() int {
+	if a.streams == nil {
+		return 0
+	}
+	return a.streams.ActiveCount()
+}
+
+func (a *App) toggleSelectedStream() {
+	if a.streams == nil {
+		return
+	}
+	status, ok := a.streamsPane.Selected(a.streamStatuses())
+	if !ok {
+		return
+	}
+	if status.Running {
+		_ = a.streams.Stop(status.ID)
+		return
+	}
+	if err := a.streams.Start(status.ID); err != nil {
+		a.eventsPane.Append("stream " + status.ID + ": " + err.Error())
+	}
+}
+
+func (a *App) openSelectedStreamDetail() {
+	status, ok := a.streamsPane.Selected(a.streamStatuses())
+	if !ok {
+		return
+	}
+	a.streamDetailID = status.ID
+	a.mode = modeStream
+}
+
+func (a *App) renderStreamDetail() string {
+	title := "Stream: " + a.streamDetailID
+	lines := a.streamLines[a.streamDetailID]
+	content := title
+	if len(lines) == 0 {
+		content += "\nNo stream output yet."
+	} else {
+		start := max(0, len(lines)-max(1, a.bodyHeight()-3))
+		content += "\n" + strings.Join(lines[start:], "\n")
+	}
+	help := "[esc/enter] close [q] quit"
+	return lipgloss.JoinVertical(
+		lipgloss.Left,
+		paneStyle(true, a.width, a.bodyHeight()).Render(content),
+		lipgloss.NewStyle().Padding(0, 1).Background(lipgloss.Color("236")).Foreground(lipgloss.Color("255")).Render(help),
+	)
 }
 
 func activePresetPtr(cfg *config.Config) *config.FilterPreset {
@@ -374,6 +631,41 @@ func parseRule(value string) config.HighlightRule {
 	}
 }
 
+func formatStream(stream config.StreamConfig) string {
+	return fmt.Sprintf("%s|%s|%s|%s|%s|%s|%t|%t", stream.ID, stream.Title, stream.Type, stream.Source, stream.Cmd, stream.CWD, boolValue(stream.Enabled), boolValue(stream.AutoStart))
+}
+
+func parseStream(value string) config.StreamConfig {
+	parts := strings.SplitN(value, "|", 8)
+	for len(parts) < 8 {
+		parts = append(parts, "")
+	}
+	enabled := parseBoolDefault(parts[6], true)
+	autoStart := parseBoolDefault(parts[7], true)
+	return config.StreamConfig{
+		ID:        strings.TrimSpace(parts[0]),
+		Title:     strings.TrimSpace(parts[1]),
+		Type:      strings.TrimSpace(parts[2]),
+		Source:    strings.TrimSpace(parts[3]),
+		Cmd:       strings.TrimSpace(parts[4]),
+		CWD:       strings.TrimSpace(parts[5]),
+		Enabled:   boolPtr(enabled),
+		AutoStart: boolPtr(autoStart),
+	}
+}
+
+func parseBoolDefault(value string, fallback bool) bool {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.ParseBool(value)
+	if err != nil {
+		return fallback
+	}
+	return parsed
+}
+
 func parseFields(value string) []string {
 	if strings.TrimSpace(value) == "" {
 		return nil
@@ -387,6 +679,63 @@ func parseFields(value string) []string {
 		}
 	}
 	return fields
+}
+
+func orderedVisibleFields(view config.LogViewConfig, observed []string) []string {
+	ordered := orderedObservedFields(view, observed)
+	if len(ordered) == 0 {
+		return nil
+	}
+
+	hidden := hiddenFieldSet(view)
+	out := make([]string, 0, len(ordered))
+	for _, field := range ordered {
+		if _, ok := hidden[field]; ok {
+			continue
+		}
+		out = append(out, field)
+	}
+	return out
+}
+
+func orderedObservedFields(view config.LogViewConfig, observed []string) []string {
+	if len(observed) == 0 {
+		return nil
+	}
+
+	observedSet := make(map[string]struct{}, len(observed))
+	for _, field := range observed {
+		observedSet[field] = struct{}{}
+	}
+
+	out := make([]string, 0, len(observed))
+	seen := make(map[string]struct{}, len(observed))
+	for _, field := range view.VisibleFields {
+		if _, ok := observedSet[field]; !ok {
+			continue
+		}
+		if _, ok := seen[field]; ok {
+			continue
+		}
+		seen[field] = struct{}{}
+		out = append(out, field)
+	}
+	for _, field := range observed {
+		if _, ok := seen[field]; ok {
+			continue
+		}
+		seen[field] = struct{}{}
+		out = append(out, field)
+	}
+	return out
+}
+
+func hiddenFieldSet(view config.LogViewConfig) map[string]struct{} {
+	set := make(map[string]struct{}, len(view.HiddenFields))
+	for _, field := range view.HiddenFields {
+		set[field] = struct{}{}
+	}
+	return set
 }
 
 func wrapWithIndent(text string, width int, indent string) string {

@@ -21,6 +21,96 @@ func TestRingBufferDropsOldest(t *testing.T) {
 	}
 }
 
+func TestRingBufferKeepsOrderAfterMultipleWraps(t *testing.T) {
+	buf, err := New(3, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range []string{"one", "two", "three", "four", "five"} {
+		buf.Append("stdout", line)
+	}
+
+	lines := buf.Snapshot(SnapshotOptions{})
+	if len(lines) != 3 {
+		t.Fatalf("len = %d", len(lines))
+	}
+	for idx, want := range []string{"three", "four", "five"} {
+		if lines[idx].Text != want {
+			t.Fatalf("line[%d] = %q, want %q", idx, lines[idx].Text, want)
+		}
+	}
+}
+
+func TestTruncateClearsLinesAndKeepsObservedFields(t *testing.T) {
+	buf, err := New(3, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	buf.Append("stdout", `level=INFO msg="hello"`)
+	buf.Truncate()
+
+	if got := buf.Len(); got != 0 {
+		t.Fatalf("Len() after Truncate() = %d", got)
+	}
+	if got := buf.Snapshot(SnapshotOptions{}); len(got) != 0 {
+		t.Fatalf("Snapshot() after Truncate() = %+v", got)
+	}
+	if got := buf.ObservedFields(); len(got) != 2 || got[0] != "level" || got[1] != "msg" {
+		t.Fatalf("ObservedFields() after Truncate() = %#v", got)
+	}
+
+	buf.Append("stdout", `level=ERROR msg="again"`)
+	lines := buf.Snapshot(SnapshotOptions{})
+	if len(lines) != 1 || lines[0].Text != `level=ERROR msg="again"` {
+		t.Fatalf("unexpected lines after append: %+v", lines)
+	}
+}
+
+func TestSnapshotLimitReturnsLastMatchingLines(t *testing.T) {
+	buf, err := New(10, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range []string{
+		`level=INFO msg="one"`,
+		`level=ERROR msg="two"`,
+		`level=INFO msg="three"`,
+		`level=ERROR msg="four"`,
+	} {
+		buf.Append("stdout", line)
+	}
+
+	lines := buf.Snapshot(SnapshotOptions{Query: "level=error", Limit: 1})
+	if len(lines) != 1 {
+		t.Fatalf("len = %d", len(lines))
+	}
+	if got := lines[0].RawFields["msg"]; got != "four" {
+		t.Fatalf("msg = %q, want four", got)
+	}
+}
+
+func TestSnapshotCacheInvalidatesOnAppend(t *testing.T) {
+	buf, err := New(10, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	buf.Append("stdout", `level=INFO msg="one"`)
+
+	lines := buf.Snapshot(SnapshotOptions{Query: "level=info"})
+	if len(lines) != 1 {
+		t.Fatalf("initial len = %d", len(lines))
+	}
+
+	buf.Append("stdout", `level=INFO msg="two"`)
+	lines = buf.Snapshot(SnapshotOptions{Query: "level=info"})
+	if len(lines) != 2 {
+		t.Fatalf("len after append = %d", len(lines))
+	}
+	if got := lines[1].RawFields["msg"]; got != "two" {
+		t.Fatalf("last msg = %q", got)
+	}
+}
+
 func TestFilterKeepsRuleHighlightOnly(t *testing.T) {
 	buf, err := New(10, []config.HighlightRule{{ID: "err", Pattern: "error", Style: "error", Priority: 1}})
 	if err != nil {
@@ -62,6 +152,27 @@ func TestLogfmtFieldFilters(t *testing.T) {
 	}
 }
 
+func TestObservedFieldsTracksFirstSeenOrder(t *testing.T) {
+	buf, err := New(10, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	buf.Append("stdout", `level=INFO msg="hello"`)
+	buf.Append("stdout", `msg="again" component=api status=200 LEVEL=DEBUG`)
+
+	got := buf.ObservedFields()
+	want := []string{"level", "msg", "component", "status"}
+	if len(got) != len(want) {
+		t.Fatalf("ObservedFields() = %#v", got)
+	}
+	for idx := range want {
+		if got[idx] != want[idx] {
+			t.Fatalf("ObservedFields()[%d] = %q, want %q; all fields: %#v", idx, got[idx], want[idx], got)
+		}
+	}
+}
+
 func TestInvalidLogfmtStillMatchesPlainText(t *testing.T) {
 	buf, err := New(10, nil)
 	if err != nil {
@@ -97,6 +208,60 @@ func TestPresetClausesUseORLogic(t *testing.T) {
 
 	if len(lines) != 2 {
 		t.Fatalf("len = %d", len(lines))
+	}
+}
+
+func TestFieldFiltersUseContainsAndANDLogic(t *testing.T) {
+	buf, err := New(10, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	buf.Append("stdout", `level=INFO component=api msg="ready"`)
+	buf.Append("stdout", `level=ERROR component=api msg="bad"`)
+	buf.Append("stdout", `level=ERROR component=worker msg="bad"`)
+
+	lines := buf.Snapshot(SnapshotOptions{
+		FieldFilters: map[string]string{
+			"level":     "err",
+			"component": "api",
+		},
+	})
+	if len(lines) != 1 {
+		t.Fatalf("len = %d", len(lines))
+	}
+	if got := lines[0].Fields["component"]; got != "api" {
+		t.Fatalf("component = %q", got)
+	}
+}
+
+func TestFieldFiltersIgnoreEmptyValuesAndRequireExistingFields(t *testing.T) {
+	buf, err := New(10, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	buf.Append("stdout", `level=ERROR component=api`)
+
+	lines := buf.Snapshot(SnapshotOptions{
+		FieldFilters: map[string]string{
+			"level":   "err",
+			"missing": "value",
+			"empty":   "",
+		},
+	})
+	if len(lines) != 0 {
+		t.Fatalf("expected missing field filter to exclude line, got %d", len(lines))
+	}
+
+	lines = buf.Snapshot(SnapshotOptions{
+		FieldFilters: map[string]string{
+			"level": "ERR",
+			"empty": "",
+		},
+	})
+	if len(lines) != 1 {
+		t.Fatalf("expected empty field filter to be ignored, got %d", len(lines))
 	}
 }
 

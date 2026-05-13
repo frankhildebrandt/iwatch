@@ -13,10 +13,8 @@ import (
 )
 
 var (
-	timeFormats      = []string{"time", "date-short", "relative"}
-	wrapModes        = []string{"off", "simple", "field"}
-	logfmtKeyStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
-	logfmtValueStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
+	timeFormats = []string{"time", "date-short", "relative"}
+	wrapModes   = []string{"off", "simple", "field"}
 )
 
 type logPaneContext struct {
@@ -27,6 +25,7 @@ type logPaneContext struct {
 	StatusDetail  string
 	BufferLen     int
 	BufferCap     int
+	StreamCount   int
 }
 
 // LogPane owns log rendering, query input, selection, and cursor state.
@@ -69,7 +68,7 @@ func (p *LogPane) IsOpen() bool {
 func (p *LogPane) SetOpen(_ bool) {}
 
 // View renders the main log pane.
-func (p *LogPane) View(width, height int, focused bool, lines []buffer.ViewLine, view config.LogViewConfig, ctx logPaneContext) string {
+func (p *LogPane) View(width, height int, focused bool, lines []buffer.ViewLine, observed []string, view config.LogViewConfig, ctx logPaneContext) string {
 	header := p.renderHeader(ctx)
 	if len(lines) == 0 {
 		return logPaneStyle(width, height).Render(header + "\nNo output yet.")
@@ -81,11 +80,11 @@ func (p *LogPane) View(width, height int, focused bool, lines []buffer.ViewLine,
 	if p.cursor < 0 {
 		p.cursor = 0
 	}
-	start, end := p.visibleRange(width, height, lines, view)
+	start, end := p.visibleRange(width, height, lines, observed, view)
 
 	rendered := make([]string, 0, end-start)
 	for idx := start; idx < end; idx++ {
-		rendered = append(rendered, p.renderStyledLine(lines[idx], width-4, p.selecting && idx == p.cursor, view))
+		rendered = append(rendered, p.renderStyledLine(lines[idx], width-4, p.selecting && idx == p.cursor, observed, view))
 	}
 	content := header + "\n" + strings.Join(rendered, "\n")
 	return logPaneStyle(width, height).Render(content)
@@ -94,13 +93,13 @@ func (p *LogPane) View(width, height int, focused bool, lines []buffer.ViewLine,
 // InputBar renders the current help and query bar below the panes.
 func (p *LogPane) InputBar() string {
 	label := "log"
-	keys := "[j/k, arrows, pgup/pgdown, ctrl+u/d, home/end/G] nav [s] select [enter] tail [r] rebuild [c] commands [/] query [w] events [g] config [S] split [[]/[]] preset [tab] focus [n/N] hit [q|esc x3] quit"
+	keys := "[j/k, arrows, pgup/pgdown, ctrl+u/d, home/end/G] nav [t] truncate [v] fields [F] field filter [r] rebuild [l] streams [/] query [g] config [S] split [[]/[]] preset [tab] focus [n/N] hit [?] help [q|esc x3] quit"
 	if p.queryInput.Focused() {
 		label = "query"
 		keys = "[esc] close [enter] close"
 	} else if p.selecting {
 		label = "select"
-		keys = "[j/k, arrows, pgup/pgdown, home/end/G] choose [enter] details [s] cancel [q|esc x3] quit"
+		keys = "[j/k, arrows, pgup/pgdown, home/end/G] choose [esc] tail [?] help [q] quit"
 	}
 
 	value := p.queryInput.View()
@@ -120,15 +119,16 @@ func (p *LogPane) InputBar() string {
 }
 
 func (p *LogPane) renderHeader(ctx logPaneContext) string {
-	info := fmt.Sprintf("cmd: %s | preset: %s | run: %s | watch: %s | buffer: %d/%d", ctx.CommandTitle, ctx.PresetTitle, ctx.ProcessStatus, ctx.WatchStatus, ctx.BufferLen, ctx.BufferCap)
+	info := fmt.Sprintf("cmd: %s | preset: %s | run: %s | watch: %s | streams: %d | buffer: %d/%d", ctx.CommandTitle, ctx.PresetTitle, ctx.ProcessStatus, ctx.WatchStatus, ctx.StreamCount, ctx.BufferLen, ctx.BufferCap)
 	if ctx.StatusDetail != "" {
 		info += " | " + ctx.StatusDetail
 	}
 	return lipgloss.NewStyle().Foreground(lipgloss.Color("245")).Render(info)
 }
 
-func (p *LogPane) renderStyledLine(line buffer.ViewLine, width int, selected bool, view config.LogViewConfig) string {
+func (p *LogPane) renderStyledLine(line buffer.ViewLine, width int, selected bool, observed []string, view config.LogViewConfig) string {
 	style := lipgloss.NewStyle()
+	palette := paletteForLogView(view)
 	switch line.HighlightRule {
 	case "error":
 		style = style.Foreground(lipgloss.Color("9")).Bold(true)
@@ -147,20 +147,17 @@ func (p *LogPane) renderStyledLine(line buffer.ViewLine, width int, selected boo
 
 	timeColumn := ""
 	if boolValue(view.ShowTimestamp) && view.TimeFormat == "time" {
-		timeColumn = padRight(formatTimestamp(line.Timestamp, view.TimeFormat), 8)
+		timeColumn = palette.renderTime(padRight(formatTimestamp(line.Timestamp, view.TimeFormat), 8))
 	}
 
-	contentParts := make([]string, 0, 1+len(view.VisibleFields))
+	fields := orderedVisibleFields(view, observed)
+	contentParts := make([]string, 0, 1+len(fields))
 	if boolValue(view.ShowSource) {
 		contentParts = append(contentParts, line.Source)
 	}
-	for _, field := range view.VisibleFields {
-		field = strings.TrimSpace(field)
-		if field == "" {
-			continue
-		}
+	for _, field := range fields {
 		if value, ok := line.Fields[strings.ToLower(field)]; ok {
-			contentParts = append(contentParts, renderStyledLogfmtPair(field, value))
+			contentParts = append(contentParts, renderStyledLogfmtPair(field, value, palette))
 		}
 	}
 
@@ -172,7 +169,7 @@ func (p *LogPane) renderStyledLine(line buffer.ViewLine, width int, selected boo
 		body = line.Text
 	}
 	if body != "" {
-		contentParts = append(contentParts, styleLogfmtText(body))
+		contentParts = append(contentParts, styleLogfmtText(body, palette))
 	}
 
 	content := strings.Join(contentParts, " | ")
@@ -247,7 +244,7 @@ func (p *LogPane) pageCursor(direction int, pageSize int) {
 	p.moveCursor(direction * step)
 }
 
-func (p *LogPane) visibleRange(width, height int, lines []buffer.ViewLine, view config.LogViewConfig) (int, int) {
+func (p *LogPane) visibleRange(width, height int, lines []buffer.ViewLine, observed []string, view config.LogViewConfig) (int, int) {
 	if len(lines) == 0 {
 		return 0, 0
 	}
@@ -257,7 +254,7 @@ func (p *LogPane) visibleRange(width, height int, lines []buffer.ViewLine, view 
 	usedRows := 0
 	end := start
 	for idx := start; idx < len(lines); idx++ {
-		lineRows := p.lineHeight(lines[idx], width, view)
+		lineRows := p.lineHeight(lines[idx], width, observed, view)
 		if idx > start && usedRows+lineRows > contentRows {
 			break
 		}
@@ -270,7 +267,7 @@ func (p *LogPane) visibleRange(width, height int, lines []buffer.ViewLine, view 
 	return start, end
 }
 
-func (p *LogPane) lineIndexAt(y, width, height int, lines []buffer.ViewLine, view config.LogViewConfig) (int, bool) {
+func (p *LogPane) lineIndexAt(y, width, height int, lines []buffer.ViewLine, observed []string, view config.LogViewConfig) (int, bool) {
 	if len(lines) == 0 || width < 4 || height < 3 {
 		return 0, false
 	}
@@ -280,10 +277,10 @@ func (p *LogPane) lineIndexAt(y, width, height int, lines []buffer.ViewLine, vie
 	}
 	contentRow := y - 2
 
-	start, end := p.visibleRange(width, height, lines, view)
+	start, end := p.visibleRange(width, height, lines, observed, view)
 	row := 0
 	for idx := start; idx < end; idx++ {
-		renderedHeight := p.lineHeight(lines[idx], width, view)
+		renderedHeight := p.lineHeight(lines[idx], width, observed, view)
 		if contentRow >= row && contentRow < row+renderedHeight {
 			return idx, true
 		}
@@ -345,7 +342,7 @@ func (p *LogPane) syncAutoScroll(lines []buffer.ViewLine) {
 	p.autoScroll = p.cursor >= len(lines)-1
 }
 
-func (p *LogPane) ensureCursorVisible(width, height int, lines []buffer.ViewLine, view config.LogViewConfig) {
+func (p *LogPane) ensureCursorVisible(width, height int, lines []buffer.ViewLine, observed []string, view config.LogViewConfig) {
 	if len(lines) == 0 {
 		p.cursor = 0
 		p.viewportTop = 0
@@ -359,11 +356,11 @@ func (p *LogPane) ensureCursorVisible(width, height int, lines []buffer.ViewLine
 	}
 
 	if p.autoScroll && p.cursor >= len(lines)-1 {
-		p.viewportTop = p.tailViewportTop(width, height, lines, view)
+		p.viewportTop = p.tailViewportTop(width, height, lines, observed, view)
 		return
 	}
 
-	start, end := p.visibleRange(width, height, lines, view)
+	start, end := p.visibleRange(width, height, lines, observed, view)
 	if p.cursor < start {
 		p.viewportTop = p.cursor
 		return
@@ -374,7 +371,7 @@ func (p *LogPane) ensureCursorVisible(width, height int, lines []buffer.ViewLine
 
 	for top := start + 1; top < len(lines); top++ {
 		p.viewportTop = top
-		start, end = p.visibleRange(width, height, lines, view)
+		start, end = p.visibleRange(width, height, lines, observed, view)
 		if p.cursor >= start && p.cursor < end {
 			return
 		}
@@ -383,16 +380,16 @@ func (p *LogPane) ensureCursorVisible(width, height int, lines []buffer.ViewLine
 	p.viewportTop = p.cursor
 }
 
-func (p *LogPane) tailViewportTop(width, height int, lines []buffer.ViewLine, view config.LogViewConfig) int {
+func (p *LogPane) tailViewportTop(width, height int, lines []buffer.ViewLine, observed []string, view config.LogViewConfig) int {
 	if len(lines) == 0 {
 		return 0
 	}
 
 	contentRows := max(1, height-3)
 	start := len(lines) - 1
-	usedRows := p.lineHeight(lines[start], width, view)
+	usedRows := p.lineHeight(lines[start], width, observed, view)
 	for start > 0 {
-		nextRows := p.lineHeight(lines[start-1], width, view)
+		nextRows := p.lineHeight(lines[start-1], width, observed, view)
 		if usedRows+nextRows > contentRows {
 			break
 		}
@@ -402,8 +399,8 @@ func (p *LogPane) tailViewportTop(width, height int, lines []buffer.ViewLine, vi
 	return start
 }
 
-func (p *LogPane) lineHeight(line buffer.ViewLine, width int, view config.LogViewConfig) int {
-	return lipgloss.Height(p.renderStyledLine(line, width-4, p.selecting && line.Index == p.cursor, view))
+func (p *LogPane) lineHeight(line buffer.ViewLine, width int, observed []string, view config.LogViewConfig) int {
+	return lipgloss.Height(p.renderStyledLine(line, width-4, p.selecting && line.Index == p.cursor, observed, view))
 }
 
 func logPaneStyle(width, height int) lipgloss.Style {
@@ -413,7 +410,7 @@ func logPaneStyle(width, height int) lipgloss.Style {
 		Height(height)
 }
 
-func styleLogfmtText(value string) string {
+func styleLogfmtText(value string, palette logPalette) string {
 	tokens := splitTokens(value)
 	if len(tokens) == 0 {
 		return value
@@ -426,13 +423,13 @@ func styleLogfmtText(value string) string {
 			styled = append(styled, token)
 			continue
 		}
-		styled = append(styled, renderStyledLogfmtPair(key, rawValue))
+		styled = append(styled, renderStyledLogfmtPair(key, rawValue, palette))
 	}
 	return strings.Join(styled, " ")
 }
 
-func renderStyledLogfmtPair(key, value string) string {
-	return logfmtKeyStyle.Render(key) + "=" + logfmtValueStyle.Render(value)
+func renderStyledLogfmtPair(key, value string, palette logPalette) string {
+	return palette.renderKey(key) + "=" + palette.renderValue(value)
 }
 
 func formatTimestamp(ts time.Time, mode string) string {

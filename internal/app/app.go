@@ -11,6 +11,7 @@ import (
 	"github.com/stackriot/iwatch/internal/config"
 	"github.com/stackriot/iwatch/internal/detect"
 	"github.com/stackriot/iwatch/internal/runner"
+	"github.com/stackriot/iwatch/internal/stream"
 	"github.com/stackriot/iwatch/internal/tui"
 	"github.com/stackriot/iwatch/internal/watch"
 )
@@ -60,12 +61,13 @@ func Run(args []string) error {
 			}
 
 			run := runner.New()
+			streams := stream.New(cfg.Streams, wd)
 			watcher, err := watch.New(watchPath)
 			if err != nil {
 				return fmt.Errorf("start watcher: %w", err)
 			}
 
-			return tui.Run(cfg, projectConfigPath, discovered.Commands, defaultCommand, logBuffer, run, watcher)
+			return tui.Run(cfg, projectConfigPath, discovered.Commands, defaultCommand, logBuffer, run, streams, watcher)
 		},
 	}
 

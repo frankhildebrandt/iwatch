@@ -8,6 +8,7 @@
 - Rekursives Watching des aktuellen Pfads oder eines expliziten `--path`
 - Manueller Rebuild-Flow mit sichtbarem `rebuild possible`-Status
 - TUI mit Log-View, Command-Palette, Bottom-Query und Watch-Events
+- Zusaetzliche LogStreams fuer Dateien und Hintergrundprozesse, pro Preset aktivierbar
 - Scrollen per Cursor, Live-Filter, logfmt-verstaendige Feldabfragen und Highlight-Regeln
 - Selektierbare Logzeilen mit Detailansicht fuer geparste Felder und pretty printed JSON-Werte
 - Benannte Filter-Presets mit OR-Klauseln, Highlighting, Logfeld-Anzeige und Zeitformaten
@@ -35,17 +36,23 @@ iwatch --config ./.iwatch.config.json
 
 - `r`: aktives Command stoppen und neu starten
 - `c`: Command-Palette oeffnen oder schliessen
+- `?`: Keymap-Hilfe oeffnen oder schliessen
+- `l`: Streams-Pane oeffnen oder schliessen
 - `/`: Bottom-Query oeffnen
 - `f`: Bottom-Query oeffnen
 - `w`: Watch-Events-Pane oeffnen
+- `v`: Logfeld-Menue oeffnen, per Tippen filtern und erkannte logfmt-Felder ein-/ausblenden
+- `F`: Live-Feldfilter oeffnen, Felder waehlen und per Contains-Wert filtern
 - `g`: Fullscreen-Config-Editor oeffnen
 - `[` / `]` oder `left/right`: zwischen konfigurierten Presets umschalten
 - `tab`: Fokus zwischen offenen Panes wechseln
 - `up/down`, `j/k`: scrollen oder Listen bewegen
 - `pgup/pgdown`, `ctrl+u/ctrl+d`: seitenweise scrollen
 - `home/end`, `G`: an Anfang oder Ende springen
-- `s`: Logzeilen-Auswahl mit Cursor an- oder ausschalten
 - `enter`: ans Log-Ende springen oder in der Auswahl die Detailansicht oeffnen
+- `enter` im Streams-Pane: ausgewaehlten on-demand Stream starten oder laufenden Stream stoppen
+- `o` im Streams-Pane: Ausgabe eines einzelnen Streams modal anzeigen
+- `t`: Logbuffer leeren und wieder ans Log-Ende springen
 - `enter` zweimal schnell: visuellen Trenner einfuegen
 - `n` / `N`: zum naechsten oder vorherigen sichtbaren Treffer
 - `S`: Split-Richtung wechseln
@@ -62,6 +69,8 @@ iwatch --config ./.iwatch.config.json
 - Feldwerte matchen case-insensitive als Substring, also passt `msg=heart` auch auf `msg="thread example heartbeat"`.
 
 Die Bottom-Query wirkt zusaetzlich auf das aktive Preset. Strukturierte OR-Filter werden in der Config-Datei ueber Presets gepflegt.
+
+Der Live-Feldfilter unter `F` wirkt nur fuer die laufende Sitzung. Mehrere gesetzte Feldfilter werden mit `AND` kombiniert und matchen case-insensitive per Contains gegen erkannte logfmt-Felder.
 
 ## Config Editor
 
@@ -101,6 +110,22 @@ Beispiel:
       "source": "config"
     }
   ],
+  "streams": [
+    {
+      "id": "app-log",
+      "title": "App log",
+      "type": "file",
+      "source": "./logs/app.log"
+    },
+    {
+      "id": "worker",
+      "title": "Worker",
+      "type": "process",
+      "cmd": "npm run worker",
+      "cwd": "./",
+      "autoStart": false
+    }
+  ],
   "highlightRules": [
     {
       "id": "errors",
@@ -124,6 +149,7 @@ Beispiel:
       {
         "id": "ops",
         "title": "Ops",
+        "streams": ["app-log", "worker"],
         "clauses": [
           {
             "conditions": [
@@ -160,11 +186,13 @@ Beispiel:
     ],
     "logView": {
       "visibleFields": ["level", "msg", "lua-manager.resource"],
+      "hiddenFields": ["debug"],
       "showRawMessage": true,
       "showSource": false,
       "showTimestamp": true,
       "timeFormat": "date-short",
-      "wrapMode": "field"
+      "wrapMode": "field",
+      "palette": "default"
     }
   }
 }
@@ -176,11 +204,22 @@ Beispiel:
 - `clauses[*].conditions` innerhalb einer Clause werden mit AND kombiniert.
 - Bedingungen mit `field` matchen gegen erkannte logfmt-Felder.
 - Bedingungen ohne `field` matchen als Freitext gegen die komplette Logzeile.
+- `ui.presets[*].streams` aktiviert zusaetzliche Stream-IDs fuer dieses Preset; eine leere Liste startet keine Zusatzstreams und behaelt damit das bisherige Verhalten bei.
+
+### LogStreams
+
+- Root-`streams` definiert zusaetzliche Eingaben fuer die globale LogView.
+- `type: "file"` liest `source` als Datei- oder Glob-Pfad. Beim Start springt der Stream ans aktuelle Dateiende und liest nur neue Zeilen. Truncate, Delete oder Recreate werden toleriert; nach Cleanup wird wieder ab Dateiende weitergelesen.
+- `type: "process"` startet `cmd` mit optionalem `cwd` als Hintergrundprozess. `autoStart: false` macht den Stream on-demand startbar im Streams-Pane.
+- Nur Streams, die im aktiven Preset genannt sind und laufen, schreiben in den globalen Buffer. Dadurch wirken Bottom-Query, globale Suche, Feldfilter, Highlighting und Detailansicht unveraendert auch auf Stream-Zeilen.
 
 ### Log View
 
 - `timeFormat`: `time`, `date-short`, `relative`
   Bei `date-short` und `relative` wird keine separate Zeitspalte gerendert; die feste Zeitspalte ist nur fuer `time` sichtbar.
 - `wrapMode`: `off`, `simple`, `field`
-- `visibleFields`: steuert Reihenfolge und Sichtbarkeit einzelner logfmt-Felder
+- `palette`: `default`, `contrast`, `ocean`, `forest`, `ember`
+  In `default` wird die Zeit dunkelgrau, der logfmt-Key hellgrau und der Wert weiss gerendert.
+- `visibleFields`: steuert die bevorzugte Reihenfolge erkannter logfmt-Felder; neue Felder werden automatisch angehaengt
+- `hiddenFields`: blendet erkannte logfmt-Felder aus; das Feld-Menue schreibt diese Liste erst nach explizitem Speichern in die Config
 - Root-`highlightRules` bleiben als Rueckwaertskompatibilitaets-Fallback aktiv, wenn ein Preset keine eigenen Regeln hat
