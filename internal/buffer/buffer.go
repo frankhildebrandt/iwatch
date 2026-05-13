@@ -2,6 +2,7 @@ package buffer
 
 import (
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -10,6 +11,8 @@ import (
 
 	"github.com/stackriot/iwatch/internal/config"
 )
+
+const shortMemoryLines = 1000
 
 // Line stores one buffered log line and its parsed metadata.
 type Line struct {
@@ -32,9 +35,11 @@ type ViewLine struct {
 
 // SnapshotOptions describes how visible lines should be filtered and highlighted.
 type SnapshotOptions struct {
-	Preset     config.FilterPreset
-	Query      string
-	Highlights []config.HighlightRule
+	Preset       config.FilterPreset
+	Query        string
+	FieldFilters map[string]string
+	Highlights   []config.HighlightRule
+	Limit        int
 }
 
 // LogBuffer keeps a bounded in-memory history of log lines.
@@ -42,11 +47,19 @@ type LogBuffer struct {
 	mu         sync.RWMutex
 	capacity   int
 	lines      []Line
+	shortLines []Line
+	start      int
+	version    uint64
 	nextIdx    int
 	session    int
+	fieldOrder []string
+	fieldSet   map[string]struct{}
 	baseRules  []config.HighlightRule
 	compiledBy string
 	compiled   []compiledRule
+	cacheKey   string
+	cacheVer   uint64
+	cacheLines []ViewLine
 }
 
 type compiledRule struct {
@@ -66,9 +79,11 @@ func New(capacity int, rules []config.HighlightRule) (*LogBuffer, error) {
 	}
 
 	return &LogBuffer{
-		capacity:  capacity,
-		lines:     make([]Line, 0, min(capacity, 1024)),
-		baseRules: append([]config.HighlightRule(nil), rules...),
+		capacity:   capacity,
+		lines:      make([]Line, 0, min(capacity, 1024)),
+		shortLines: make([]Line, 0, min(capacity, shortMemoryLines)),
+		fieldSet:   make(map[string]struct{}),
+		baseRules:  append([]config.HighlightRule(nil), rules...),
 	}, nil
 }
 
@@ -86,7 +101,7 @@ func (b *LogBuffer) Append(source, text string) {
 	defer b.mu.Unlock()
 
 	clean := stripANSI(text)
-	fields, rawFields := parseLogfmtFields(clean)
+	fields, rawFields, fieldKeys := parseLogfmtFields(clean)
 	line := Line{
 		Index:     b.nextIdx,
 		Session:   b.session,
@@ -98,20 +113,49 @@ func (b *LogBuffer) Append(source, text string) {
 		Timestamp: time.Now(),
 	}
 	b.nextIdx++
+	b.version++
+	b.cacheKey = ""
+	b.cacheLines = nil
+	b.recordObservedFields(fieldKeys)
+	b.appendShort(line)
 
 	if len(b.lines) == b.capacity {
-		copy(b.lines, b.lines[1:])
-		b.lines[len(b.lines)-1] = line
+		b.lines[b.start] = line
+		b.start = (b.start + 1) % b.capacity
 		return
 	}
 
 	b.lines = append(b.lines, line)
 }
 
+// Truncate clears buffered log lines while keeping session and observed field metadata.
+func (b *LogBuffer) Truncate() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	clear(b.lines)
+	b.lines = b.lines[:0]
+	clear(b.shortLines)
+	b.shortLines = b.shortLines[:0]
+	b.start = 0
+	b.version++
+	b.cacheKey = ""
+	b.cacheLines = nil
+}
+
+// ObservedFields returns all logfmt keys seen so far in first-seen order.
+func (b *LogBuffer) ObservedFields() []string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	return append([]string(nil), b.fieldOrder...)
+}
+
 // Snapshot returns the currently visible lines for the supplied query and preset.
 func (b *LogBuffer) Snapshot(opts SnapshotOptions) []ViewLine {
 	presetQuery := parsePreset(opts.Preset)
 	runtimeQuery := parseQuery(opts.Query)
+	fieldFilters := parseFieldFilters(opts.FieldFilters)
 	rules := opts.Highlights
 	if len(rules) == 0 {
 		rules = b.baseRules
@@ -121,9 +165,43 @@ func (b *LogBuffer) Snapshot(opts SnapshotOptions) []ViewLine {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 
+	key := snapshotCacheKey(opts, rules)
+	if key == b.cacheKey && b.cacheVer == b.version {
+		return cloneViewLines(b.cacheLines)
+	}
+
 	var out []ViewLine
-	for _, line := range b.lines {
-		if !presetQuery.matches(line) || !runtimeQuery.matches(line) {
+	if opts.Limit > 0 {
+		out = b.limitedSnapshot(opts, presetQuery, runtimeQuery, fieldFilters, compiled)
+	} else {
+		out = b.fullSnapshot(presetQuery, runtimeQuery, fieldFilters, compiled)
+	}
+
+	b.cacheKey = key
+	b.cacheVer = b.version
+	b.cacheLines = cloneViewLines(out)
+	return out
+}
+
+// Len returns the number of buffered lines.
+func (b *LogBuffer) Len() int {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return len(b.lines)
+}
+
+func (b *LogBuffer) lineAt(index int) Line {
+	if len(b.lines) < b.capacity {
+		return b.lines[index]
+	}
+	return b.lines[(b.start+index)%b.capacity]
+}
+
+func (b *LogBuffer) fullSnapshot(presetQuery parsedPreset, runtimeQuery parsedQuery, fieldFilters parsedFieldFilters, compiled []compiledRule) []ViewLine {
+	out := make([]ViewLine, 0, len(b.lines))
+	for idx := 0; idx < len(b.lines); idx++ {
+		line := b.lineAt(idx)
+		if !presetQuery.matches(line) || !runtimeQuery.matches(line) || !fieldFilters.matches(line) {
 			continue
 		}
 		view := ViewLine{Line: line}
@@ -133,11 +211,104 @@ func (b *LogBuffer) Snapshot(opts SnapshotOptions) []ViewLine {
 	return out
 }
 
-// Len returns the number of buffered lines.
-func (b *LogBuffer) Len() int {
-	b.mu.RLock()
-	defer b.mu.RUnlock()
-	return len(b.lines)
+func (b *LogBuffer) limitedSnapshot(opts SnapshotOptions, presetQuery parsedPreset, runtimeQuery parsedQuery, fieldFilters parsedFieldFilters, compiled []compiledRule) []ViewLine {
+	out := make([]ViewLine, 0, min(len(b.lines), opts.Limit))
+	for idx := len(b.shortLines) - 1; idx >= 0 && len(out) < opts.Limit; idx-- {
+		line := b.shortLines[idx]
+		if !presetQuery.matches(line) || !runtimeQuery.matches(line) || !fieldFilters.matches(line) {
+			continue
+		}
+		view := ViewLine{Line: line}
+		view.HighlightRule = matchRule(compiled, line.Text)
+		out = append(out, view)
+	}
+
+	for idx := len(b.lines) - len(b.shortLines) - 1; idx >= 0 && len(out) < opts.Limit; idx-- {
+		line := b.lineAt(idx)
+		if !presetQuery.matches(line) || !runtimeQuery.matches(line) || !fieldFilters.matches(line) {
+			continue
+		}
+		view := ViewLine{Line: line}
+		view.HighlightRule = matchRule(compiled, line.Text)
+		out = append(out, view)
+	}
+
+	for left, right := 0, len(out)-1; left < right; left, right = left+1, right-1 {
+		out[left], out[right] = out[right], out[left]
+	}
+	return out
+}
+
+func (b *LogBuffer) appendShort(line Line) {
+	limit := min(b.capacity, shortMemoryLines)
+	if len(b.shortLines) == limit {
+		copy(b.shortLines, b.shortLines[1:])
+		b.shortLines[len(b.shortLines)-1] = line
+		return
+	}
+	b.shortLines = append(b.shortLines, line)
+}
+
+func (b *LogBuffer) recordObservedFields(fields []string) {
+	for _, key := range fields {
+		if _, ok := b.fieldSet[key]; ok {
+			continue
+		}
+		b.fieldSet[key] = struct{}{}
+		b.fieldOrder = append(b.fieldOrder, key)
+	}
+}
+
+func snapshotCacheKey(opts SnapshotOptions, rules []config.HighlightRule) string {
+	return strings.Join([]string{
+		opts.Query,
+		presetKey(opts.Preset),
+		fieldFiltersKey(opts.FieldFilters),
+		rulesKey(rules),
+		strconv.Itoa(opts.Limit),
+	}, "\x00")
+}
+
+func presetKey(preset config.FilterPreset) string {
+	var builder strings.Builder
+	builder.WriteString(preset.ID)
+	builder.WriteByte('|')
+	builder.WriteString(preset.Title)
+	for _, clause := range preset.Clauses {
+		builder.WriteByte('[')
+		for _, cond := range clause.Conditions {
+			builder.WriteString(cond.Field)
+			builder.WriteByte('=')
+			builder.WriteString(cond.Value)
+			builder.WriteByte(';')
+		}
+		builder.WriteByte(']')
+	}
+	return builder.String()
+}
+
+func fieldFiltersKey(filters map[string]string) string {
+	if len(filters) == 0 {
+		return ""
+	}
+	keys := make([]string, 0, len(filters))
+	for key := range filters {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+
+	var builder strings.Builder
+	for _, key := range keys {
+		builder.WriteString(key)
+		builder.WriteByte('=')
+		builder.WriteString(filters[key])
+		builder.WriteByte('\n')
+	}
+	return builder.String()
+}
+
+func cloneViewLines(lines []ViewLine) []ViewLine {
+	return append([]ViewLine(nil), lines...)
 }
 
 func (b *LogBuffer) rulesFor(rules []config.HighlightRule) ([]compiledRule, error) {
@@ -221,6 +392,10 @@ type parsedQuery struct {
 	terms []queryTerm
 }
 
+type parsedFieldFilters struct {
+	terms []queryTerm
+}
+
 type queryTerm struct {
 	key   string
 	value string
@@ -282,8 +457,30 @@ func parseQuery(raw string) parsedQuery {
 	return parsedQuery{terms: terms}
 }
 
+func parseFieldFilters(filters map[string]string) parsedFieldFilters {
+	terms := make([]queryTerm, 0, len(filters))
+	for key, value := range filters {
+		key = strings.ToLower(strings.TrimSpace(key))
+		value = strings.ToLower(strings.TrimSpace(value))
+		if key == "" || value == "" {
+			continue
+		}
+		terms = append(terms, queryTerm{key: key, value: value})
+	}
+	return parsedFieldFilters{terms: terms}
+}
+
 func (q parsedQuery) matches(line Line) bool {
 	for _, term := range q.terms {
+		if !conditionMatches(term, line) {
+			return false
+		}
+	}
+	return true
+}
+
+func (f parsedFieldFilters) matches(line Line) bool {
+	for _, term := range f.terms {
 		if !conditionMatches(term, line) {
 			return false
 		}
@@ -339,9 +536,10 @@ func splitTokens(value string) []string {
 	return tokens
 }
 
-func parseLogfmtFields(value string) (map[string]string, map[string]string) {
+func parseLogfmtFields(value string) (map[string]string, map[string]string, []string) {
 	fields := map[string]string{}
 	rawFields := map[string]string{}
+	var keys []string
 	for _, token := range splitTokens(value) {
 		token = strings.Trim(token, "()")
 		if token == "" {
@@ -364,9 +562,10 @@ func parseLogfmtFields(value string) (map[string]string, map[string]string) {
 		}
 		fields[key] = strings.ToLower(rawValue)
 		rawFields[key] = rawValue
+		keys = append(keys, key)
 	}
 
-	return fields, rawFields
+	return fields, rawFields, keys
 }
 
 func unquoteValue(value string) (string, bool) {

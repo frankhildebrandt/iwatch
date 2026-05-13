@@ -13,24 +13,29 @@ import (
 type editorKind string
 
 const (
-	editorSave         editorKind = "save"
-	editorCancel       editorKind = "cancel"
-	editorPresetSelect editorKind = "preset-select"
-	editorPresetAdd    editorKind = "preset-add"
-	editorPresetDup    editorKind = "preset-dup"
-	editorPresetDelete editorKind = "preset-delete"
-	editorPresetID     editorKind = "preset-id"
-	editorPresetTitle  editorKind = "preset-title"
-	editorClause       editorKind = "clause"
-	editorClauseAdd    editorKind = "clause-add"
-	editorRule         editorKind = "rule"
-	editorRuleAdd      editorKind = "rule-add"
-	editorFields       editorKind = "fields"
-	editorToggleRaw    editorKind = "toggle-raw"
-	editorToggleSource editorKind = "toggle-source"
-	editorToggleTime   editorKind = "toggle-time"
-	editorTimeFormat   editorKind = "time-format"
-	editorWrapMode     editorKind = "wrap-mode"
+	editorSave          editorKind = "save"
+	editorCancel        editorKind = "cancel"
+	editorPresetSelect  editorKind = "preset-select"
+	editorPresetAdd     editorKind = "preset-add"
+	editorPresetDup     editorKind = "preset-dup"
+	editorPresetDelete  editorKind = "preset-delete"
+	editorPresetID      editorKind = "preset-id"
+	editorPresetTitle   editorKind = "preset-title"
+	editorPresetStreams editorKind = "preset-streams"
+	editorClause        editorKind = "clause"
+	editorClauseAdd     editorKind = "clause-add"
+	editorRule          editorKind = "rule"
+	editorRuleAdd       editorKind = "rule-add"
+	editorStream        editorKind = "stream"
+	editorStreamAdd     editorKind = "stream-add"
+	editorFields        editorKind = "fields"
+	editorHiddenFields  editorKind = "hidden-fields"
+	editorToggleRaw     editorKind = "toggle-raw"
+	editorToggleSource  editorKind = "toggle-source"
+	editorToggleTime    editorKind = "toggle-time"
+	editorTimeFormat    editorKind = "time-format"
+	editorWrapMode      editorKind = "wrap-mode"
+	editorPalette       editorKind = "palette"
 )
 
 // ConfigEditor owns the fullscreen config editing workflow.
@@ -131,6 +136,7 @@ func (e *ConfigEditor) rows() []editorRow {
 	rows = append(rows,
 		editorRow{section: "Filter", kind: editorPresetID, label: "Preset ID", value: active.ID},
 		editorRow{section: "Filter", kind: editorPresetTitle, label: "Preset title", value: active.Title},
+		editorRow{section: "Filter", kind: editorPresetStreams, label: "Active streams", value: strings.Join(active.Streams, ", ")},
 	)
 	for idx, clause := range active.Clauses {
 		rows = append(rows, editorRow{section: "Filter", kind: editorClause, label: fmt.Sprintf("OR clause %d", idx+1), value: formatClause(clause), index: idx})
@@ -142,13 +148,20 @@ func (e *ConfigEditor) rows() []editorRow {
 	}
 	rows = append(rows, editorRow{section: "Highlight", kind: editorRuleAdd, label: "Add highlight rule", value: "id|style|priority|pattern"})
 
+	for idx, stream := range draft.Streams {
+		rows = append(rows, editorRow{section: "Streams", kind: editorStream, label: fmt.Sprintf("Stream %d", idx+1), value: formatStream(stream), index: idx})
+	}
+	rows = append(rows, editorRow{section: "Streams", kind: editorStreamAdd, label: "Add stream", value: "id|title|type|source|cmd|cwd|enabled|autoStart"})
+
 	rows = append(rows,
 		editorRow{section: "Log fields", kind: editorFields, label: "Visible fields", value: strings.Join(draft.UI.LogView.VisibleFields, ", ")},
+		editorRow{section: "Log fields", kind: editorHiddenFields, label: "Hidden fields", value: strings.Join(draft.UI.LogView.HiddenFields, ", ")},
 		editorRow{section: "Log fields", kind: editorToggleRaw, label: "Show raw message", value: fmt.Sprintf("%t", boolValue(draft.UI.LogView.ShowRawMessage))},
 		editorRow{section: "Log fields", kind: editorToggleSource, label: "Show source", value: fmt.Sprintf("%t", boolValue(draft.UI.LogView.ShowSource))},
 		editorRow{section: "Log fields", kind: editorToggleTime, label: "Show timestamp", value: fmt.Sprintf("%t", boolValue(draft.UI.LogView.ShowTimestamp))},
 		editorRow{section: "Display", kind: editorTimeFormat, label: "Time format", value: draft.UI.LogView.TimeFormat},
 		editorRow{section: "Display", kind: editorWrapMode, label: "Wrap mode", value: draft.UI.LogView.WrapMode},
+		editorRow{section: "Display", kind: editorPalette, label: "Palette", value: draft.UI.LogView.Palette},
 	)
 
 	return rows
