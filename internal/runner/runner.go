@@ -2,7 +2,6 @@ package runner
 
 import (
 	"bufio"
-	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -40,10 +39,11 @@ type Event struct {
 type Runner struct {
 	mu      sync.Mutex
 	cmd     *exec.Cmd
-	cancel  context.CancelFunc
 	running bool
 	events  chan Event
 	done    chan struct{}
+	stop    chan time.Duration
+	force   chan struct{}
 }
 
 // New creates an idle runner.
@@ -51,6 +51,8 @@ func New() *Runner {
 	return &Runner{
 		events: make(chan Event, 256),
 		done:   make(chan struct{}),
+		stop:   make(chan time.Duration, 1),
+		force:  make(chan struct{}, 1),
 	}
 }
 
@@ -67,34 +69,30 @@ func (r *Runner) Start(command detect.Command) error {
 		return errors.New("runner already active")
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	cmd := exec.CommandContext(ctx, "sh", "-lc", command.Cmd)
+	cmd := exec.Command("sh", "-lc", command.Cmd)
 	cmd.Dir = command.CWD
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		cancel()
 		return fmt.Errorf("stdout pipe: %w", err)
 	}
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
-		cancel()
 		return fmt.Errorf("stderr pipe: %w", err)
 	}
 
 	if err := cmd.Start(); err != nil {
-		cancel()
 		return fmt.Errorf("start command: %w", err)
 	}
 
 	r.cmd = cmd
-	r.cancel = cancel
 	r.running = true
 	r.events <- Event{Type: EventStarted, PID: cmd.Process.Pid, Text: command.Cmd}
 
 	go r.stream("stdout", stdout)
 	go r.stream("stderr", stderr)
+	go r.monitorStop(cmd.Process.Pid)
 	go r.wait()
 	return nil
 }
@@ -109,31 +107,50 @@ func (r *Runner) Restart(command detect.Command) error {
 
 // Stop requests process termination and escalates to SIGKILL after the timeout.
 func (r *Runner) Stop(timeout time.Duration) error {
+	done, err := r.RequestStop(timeout)
+	if err != nil {
+		return err
+	}
+	if done == nil {
+		return nil
+	}
+	<-done
+	return nil
+}
+
+// RequestStop requests process termination and returns a channel that closes
+// when the command has exited.
+func (r *Runner) RequestStop(timeout time.Duration) (<-chan struct{}, error) {
 	r.mu.Lock()
 	if !r.running || r.cmd == nil {
 		r.mu.Unlock()
-		return nil
+		return nil, nil
 	}
-	cmd := r.cmd
-	cancel := r.cancel
 	done := r.done
+	stop := r.stop
 	r.mu.Unlock()
 
-	_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
 	select {
-	case <-done:
-		if cancel != nil {
-			cancel()
-		}
-		return nil
-	case <-time.After(timeout):
-		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-		if cancel != nil {
-			cancel()
-		}
-		<-done
+	case stop <- timeout:
+	default:
+	}
+	return done, nil
+}
+
+// ForceStop immediately terminates the running command process group.
+func (r *Runner) ForceStop() error {
+	r.mu.Lock()
+	running := r.running && r.cmd != nil
+	force := r.force
+	r.mu.Unlock()
+	if !running {
 		return nil
 	}
+	select {
+	case force <- struct{}{}:
+	default:
+	}
+	return nil
 }
 
 // Running reports whether a command is currently active.
@@ -185,8 +202,26 @@ func (r *Runner) wait() {
 	r.mu.Lock()
 	r.running = false
 	r.cmd = nil
-	r.cancel = nil
 	close(r.done)
 	r.done = make(chan struct{})
+	r.stop = make(chan time.Duration, 1)
+	r.force = make(chan struct{}, 1)
 	r.mu.Unlock()
+}
+
+func (r *Runner) monitorStop(pid int) {
+	select {
+	case timeout := <-r.stop:
+		_ = syscall.Kill(-pid, syscall.SIGTERM)
+		select {
+		case <-r.done:
+		case <-r.force:
+			_ = syscall.Kill(-pid, syscall.SIGKILL)
+		case <-time.After(timeout):
+			_ = syscall.Kill(-pid, syscall.SIGKILL)
+		}
+	case <-r.force:
+		_ = syscall.Kill(-pid, syscall.SIGKILL)
+	case <-r.done:
+	}
 }

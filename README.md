@@ -36,6 +36,7 @@ iwatch --config ./.iwatch.config.json
 
 - `r`: aktives Command stoppen und neu starten
 - `c`: Command-Palette oeffnen oder schliessen
+- `p`: Command-Output-Pane oeffnen oder schliessen
 - `?`: Keymap-Hilfe oeffnen oder schliessen
 - `l`: Streams-Pane oeffnen oder schliessen
 - `/`: Bottom-Query oeffnen
@@ -50,6 +51,8 @@ iwatch --config ./.iwatch.config.json
 - `pgup/pgdown`, `ctrl+u/ctrl+d`: seitenweise scrollen
 - `home/end`, `G`: an Anfang oder Ende springen
 - `enter`: ans Log-Ende springen oder in der Auswahl die Detailansicht oeffnen
+- `enter` im Commands-Pane: ausgewaehltes Command im Command-Output-Pane starten
+- `o` im Commands-Pane: ausgewaehltes Command als separaten Stream starten
 - `enter` im Streams-Pane: ausgewaehlten on-demand Stream starten oder laufenden Stream stoppen
 - `o` im Streams-Pane: Ausgabe eines einzelnen Streams modal anzeigen
 - `t`: Logbuffer leeren und wieder ans Log-Ende springen
@@ -204,7 +207,7 @@ Beispiel:
 - `clauses[*].conditions` innerhalb einer Clause werden mit AND kombiniert.
 - Bedingungen mit `field` matchen gegen erkannte logfmt-Felder.
 - Bedingungen ohne `field` matchen als Freitext gegen die komplette Logzeile.
-- `ui.presets[*].streams` aktiviert zusaetzliche Stream-IDs fuer dieses Preset; eine leere Liste startet keine Zusatzstreams und behaelt damit das bisherige Verhalten bei.
+- `ui.presets[*].streams` aktiviert gezielt Stream-IDs fuer dieses Preset. Wenn kein Preset ueberhaupt `streams` definiert, gelten alle konfigurierten Streams als aktiv; `autoStart: false` bleibt dabei on-demand.
 
 ### LogStreams
 

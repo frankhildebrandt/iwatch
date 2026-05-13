@@ -102,6 +102,10 @@ func (a *App) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return a, cmd
 	}
 
+	if a.focus == paneCommand && a.commandPane.IsOpen() {
+		return a.handleCommandPaneKey(msg)
+	}
+
 	if msg.String() == "esc" {
 		if a.logPane.selecting {
 			a.moveLogToTail()
@@ -126,28 +130,58 @@ func (a *App) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "?":
 		a.mode = modeHelp
 	case "up", "k":
+		if a.focus == paneCommandOutput && a.commandOutputPane.IsOpen() {
+			visible := max(1, max(5, a.bodyHeight()/3)-4)
+			a.commandOutputPane.Move(-1, len(a.streamLines[a.commandOutputPane.StreamID()]), visible)
+			return a, nil
+		}
 		if a.focus == paneStreams {
 			a.streamsPane.Move(-1, len(a.streamStatuses()))
 			return a, nil
 		}
 		a.moveLogCursor(-1)
 	case "down", "j":
+		if a.focus == paneCommandOutput && a.commandOutputPane.IsOpen() {
+			visible := max(1, max(5, a.bodyHeight()/3)-4)
+			a.commandOutputPane.Move(1, len(a.streamLines[a.commandOutputPane.StreamID()]), visible)
+			return a, nil
+		}
 		if a.focus == paneStreams {
 			a.streamsPane.Move(1, len(a.streamStatuses()))
 			return a, nil
 		}
 		a.moveLogCursor(1)
 	case "pgup", "ctrl+u":
+		if a.focus == paneCommandOutput && a.commandOutputPane.IsOpen() {
+			visible := max(1, max(5, a.bodyHeight()/3)-4)
+			a.commandOutputPane.Move(-max(1, visible/2), len(a.streamLines[a.commandOutputPane.StreamID()]), visible)
+			return a, nil
+		}
 		a.pageLogCursor(-1)
 	case "pgdown", "ctrl+d":
+		if a.focus == paneCommandOutput && a.commandOutputPane.IsOpen() {
+			visible := max(1, max(5, a.bodyHeight()/3)-4)
+			a.commandOutputPane.Move(max(1, visible/2), len(a.streamLines[a.commandOutputPane.StreamID()]), visible)
+			return a, nil
+		}
 		a.pageLogCursor(1)
 	case "home":
+		if a.focus == paneCommandOutput && a.commandOutputPane.IsOpen() {
+			visible := max(1, max(5, a.bodyHeight()/3)-4)
+			a.commandOutputPane.Move(-len(a.streamLines[a.commandOutputPane.StreamID()]), len(a.streamLines[a.commandOutputPane.StreamID()]), visible)
+			return a, nil
+		}
 		a.logWindowLimit = a.buf.Len()
 		lines := a.snapshotLines()
 		a.logPane.cursor = 0
 		a.logPane.syncAutoScroll(lines)
 		a.syncLogViewport(lines)
 	case "end", "G":
+		if a.focus == paneCommandOutput && a.commandOutputPane.IsOpen() {
+			visible := max(1, max(5, a.bodyHeight()/3)-4)
+			a.commandOutputPane.Move(len(a.streamLines[a.commandOutputPane.StreamID()]), len(a.streamLines[a.commandOutputPane.StreamID()]), visible)
+			return a, nil
+		}
 		a.moveLogToTail()
 	case "tab":
 		a.focus = a.nextPane()
@@ -158,6 +192,13 @@ func (a *App) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "c":
 		a.togglePane(paneCommand)
 		a.focus = paneCommand
+	case "p":
+		a.togglePane(paneCommandOutput)
+		if a.commandOutputPane.IsOpen() {
+			a.focus = paneCommandOutput
+		} else {
+			a.focus = paneLog
+		}
 	case "/", "f":
 		a.focus = paneLog
 		a.logPane.queryInput.Focus()
@@ -196,14 +237,13 @@ func (a *App) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			a.moveLogToTail()
 			return a, nil
 		}
+	case "o":
 		if a.focus == paneCommand {
 			if command, ok := a.commandPane.SelectedCommand(); ok {
-				a.activeCmd = command.ID
-				a.cfg.DefaultCommand = command.ID
-				return a, a.restartActive()
+				a.startCommandInStream(command)
 			}
+			return a, nil
 		}
-	case "o":
 		if a.focus == paneStreams {
 			a.openSelectedStreamDetail()
 		}
@@ -224,6 +264,31 @@ func (a *App) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		a.mode = modeConfig
 	}
 	return a, nil
+}
+
+func (a *App) handleCommandPaneKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "tab":
+		a.focus = a.nextPane()
+		return a, nil
+	case "c":
+		a.togglePane(paneCommand)
+		a.focus = paneLog
+		return a, nil
+	case "enter":
+		if command, ok := a.commandPane.SelectedCommand(); ok {
+			a.startCommandInOutputPane(command)
+		}
+		return a, nil
+	case "o":
+		if command, ok := a.commandPane.SelectedCommand(); ok {
+			a.startCommandInStream(command)
+		}
+		return a, nil
+	}
+
+	cmd := a.commandPane.Update(msg)
+	return a, cmd
 }
 
 func (a *App) handleHelpKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {

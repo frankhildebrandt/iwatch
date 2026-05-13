@@ -11,17 +11,25 @@ import (
 
 	"github.com/stackriot/iwatch/internal/buffer"
 	"github.com/stackriot/iwatch/internal/config"
+	"github.com/stackriot/iwatch/internal/detect"
 	"github.com/stackriot/iwatch/internal/runner"
 	"github.com/stackriot/iwatch/internal/stream"
 	"github.com/stackriot/iwatch/internal/watch"
 )
 
-const logShortMemoryLines = 1000
+const (
+	logShortMemoryLines = 1000
+	gracefulStopTimeout = 30 * time.Second
+)
 
 func (a *App) renderSidePanes(width, height int) string {
 	var parts []string
 	if a.commandPane.IsOpen() {
 		parts = append(parts, a.commandPane.View(width, height, a.focus == paneCommand))
+	}
+	if a.commandOutputPane.IsOpen() {
+		status, _ := a.streamStatus(a.commandOutputPane.StreamID())
+		parts = append(parts, a.commandOutputPane.View(width, height, a.focus == paneCommandOutput, status, a.streamLines[a.commandOutputPane.StreamID()]))
 	}
 	if a.eventsPane.IsOpen() {
 		parts = append(parts, a.eventsPane.View(width, height, a.focus == paneEvents))
@@ -51,14 +59,16 @@ func (a *App) logPaneContext() logPaneContext {
 }
 
 func (a *App) quitCmd() tea.Cmd {
-	if a.cancelWatch != nil {
-		a.cancelWatch()
+	if a.shutdownState != "" {
+		return a.forceShutdownCmd()
 	}
-	if a.streams != nil {
-		a.streams.StopAll()
+	if !a.hasRunningChildren() {
+		if a.cancelWatch != nil {
+			a.cancelWatch()
+		}
+		return tea.Quit
 	}
-	_ = a.runner.Stop(1500 * time.Millisecond)
-	return tea.Quit
+	return a.beginShutdown(shutdownQuit)
 }
 
 func (a *App) logPageSize() int {
@@ -103,7 +113,7 @@ func (a *App) logPaneWidth() int {
 
 func (a *App) nextPane() paneID {
 	var panes []string
-	for _, pane := range []Pane{a.logPane, a.commandPane, a.eventsPane, a.streamsPane} {
+	for _, pane := range []Pane{a.logPane, a.commandPane, a.commandOutputPane, a.eventsPane, a.streamsPane} {
 		if pane.IsOpen() {
 			panes = append(panes, string(pane.ID()))
 		}
@@ -127,6 +137,12 @@ func (a *App) togglePane(id paneID) {
 		return
 	case paneCommand:
 		a.commandPane.SetOpen(!a.commandPane.IsOpen())
+	case paneCommandOutput:
+		open := !a.commandOutputPane.IsOpen()
+		a.commandOutputPane.SetOpen(open)
+		if !open {
+			a.closeCommandOutputPane()
+		}
 	case paneEvents:
 		a.eventsPane.SetOpen(!a.eventsPane.IsOpen())
 	case paneStreams:
@@ -355,10 +371,20 @@ func fieldsFromLine(line buffer.ViewLine) []string {
 }
 
 func (a *App) startInitialRun() tea.Cmd {
-	return a.restartActive()
+	return a.startActiveCommandCmd()
 }
 
 func (a *App) restartActive() tea.Cmd {
+	if a.shutdownState != "" {
+		return a.forceShutdownCmd()
+	}
+	if a.hasRunningChildren() {
+		return a.beginShutdown(shutdownRebuild)
+	}
+	return a.startActiveCommandCmd()
+}
+
+func (a *App) startActiveCommandCmd() tea.Cmd {
 	cmd, ok := a.commandByID[a.activeCmd]
 	if !ok {
 		return func() tea.Msg {
@@ -367,17 +393,86 @@ func (a *App) restartActive() tea.Cmd {
 	}
 	a.buf.StartSession(cmd.Title)
 	return func() tea.Msg {
-		if a.runner.Running() {
-			if err := a.runner.Restart(cmd); err != nil {
-				return runnerMsg(runner.Event{Type: runner.EventError, Err: err})
-			}
-			return nil
-		}
 		if err := a.runner.Start(cmd); err != nil {
 			return runnerMsg(runner.Event{Type: runner.EventError, Err: err})
 		}
 		return nil
 	}
+}
+
+func (a *App) beginShutdown(action shutdownAction) tea.Cmd {
+	a.shutdownState = action
+	if a.cancelWatch != nil && action == shutdownQuit {
+		a.cancelWatch()
+	}
+	if a.streams != nil {
+		a.restartStreamIDs = a.streams.RunningIDs()
+	} else {
+		a.restartStreamIDs = nil
+	}
+	a.processStatus = "stopping gracefully"
+	switch action {
+	case shutdownQuit:
+		a.watchStatus = "quitting"
+		a.buf.Append("system", "quitting: stopping child processes gracefully (press q again to force)")
+	case shutdownRebuild:
+		a.watchStatus = "rebuilding"
+		a.buf.Append("system", "rebuild: stopping child processes gracefully (press r again to force)")
+	}
+	return func() tea.Msg {
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			if a.streams != nil {
+				<-a.streams.RequestStopAll(gracefulStopTimeout)
+			}
+		}()
+		if err := a.runner.Stop(gracefulStopTimeout); err != nil {
+			return runnerMsg(runner.Event{Type: runner.EventError, Err: err})
+		}
+		<-done
+		return shutdownDoneMsg{action: action}
+	}
+}
+
+func (a *App) forceShutdownCmd() tea.Cmd {
+	a.buf.Append("system", "forcing child process shutdown")
+	a.processStatus = "forcing shutdown"
+	if a.streams != nil {
+		a.streams.ForceStopAll()
+	}
+	return func() tea.Msg {
+		if err := a.runner.ForceStop(); err != nil {
+			return runnerMsg(runner.Event{Type: runner.EventError, Err: err})
+		}
+		return nil
+	}
+}
+
+func (a *App) hasRunningChildren() bool {
+	if a.runner.Running() {
+		return true
+	}
+	return a.streams != nil && a.streams.ActiveCount() > 0
+}
+
+func (a *App) handleShutdownDone(msg shutdownDoneMsg) (tea.Model, tea.Cmd) {
+	restartStreamIDs := append([]string(nil), a.restartStreamIDs...)
+	a.shutdownState = ""
+	a.restartStreamIDs = nil
+	a.processStatus = "idle"
+
+	if msg.action == shutdownQuit {
+		return a, tea.Quit
+	}
+
+	a.watchStatus = "clean"
+	for _, id := range restartStreamIDs {
+		if err := a.streams.Start(id); err != nil {
+			a.eventsPane.Append(fmt.Sprintf("stream %s restart failed: %v", id, err))
+		}
+	}
+	return a, a.startActiveCommandCmd()
 }
 
 func waitRunnerEvent(run *runner.Runner) tea.Cmd {
@@ -439,15 +534,38 @@ func activePreset(cfg config.Config) config.FilterPreset {
 }
 
 func (a *App) activeStreamIDs() []string {
+	ids := make([]string, 0, len(a.runtimeStreamOrder)+len(a.cfg.Streams))
 	preset := activePreset(a.cfg)
-	return append([]string(nil), preset.Streams...)
+	if len(preset.Streams) > 0 {
+		ids = append(ids, preset.Streams...)
+	} else {
+		hasPresetStreams := false
+		for _, candidate := range a.cfg.UI.Presets {
+			if len(candidate.Streams) > 0 {
+				hasPresetStreams = true
+				break
+			}
+		}
+		if !hasPresetStreams {
+			for _, cfg := range a.cfg.Streams {
+				if cfg.ID == "" {
+					continue
+				}
+				ids = append(ids, cfg.ID)
+			}
+		}
+	}
+	for _, id := range a.runtimeStreamOrder {
+		ids = append(ids, id)
+	}
+	return ids
 }
 
 func (a *App) applyActiveStreams() {
 	if a.streams == nil {
 		return
 	}
-	a.streams.Configure(a.cfg.Streams)
+	a.streams.Configure(a.allStreamConfigs())
 	a.streams.Apply(a.activeStreamIDs())
 }
 
@@ -456,6 +574,18 @@ func (a *App) streamStatuses() []stream.Status {
 		return nil
 	}
 	return a.streams.Statuses()
+}
+
+func (a *App) streamStatus(id string) (stream.Status, bool) {
+	if id == "" {
+		return stream.Status{}, false
+	}
+	for _, status := range a.streamStatuses() {
+		if status.ID == id {
+			return status, true
+		}
+	}
+	return stream.Status{}, false
 }
 
 func (a *App) streamCount() int {
@@ -479,6 +609,88 @@ func (a *App) toggleSelectedStream() {
 	}
 	if err := a.streams.Start(status.ID); err != nil {
 		a.eventsPane.Append("stream " + status.ID + ": " + err.Error())
+	}
+}
+
+func (a *App) allStreamConfigs() []config.StreamConfig {
+	streams := append([]config.StreamConfig(nil), a.cfg.Streams...)
+	for _, id := range a.runtimeStreamOrder {
+		cfg, ok := a.runtimeStreams[id]
+		if !ok {
+			continue
+		}
+		streams = append(streams, cfg)
+	}
+	return streams
+}
+
+func (a *App) startCommandAsStream(command detect.Command, streamID string, title string) {
+	if a.streams == nil {
+		a.eventsPane.Append("command streams unavailable")
+		return
+	}
+	if _, ok := a.runtimeStreams[streamID]; ok {
+		_ = a.streams.Stop(streamID)
+	}
+
+	cfg := config.StreamConfig{
+		ID:        streamID,
+		Title:     title,
+		Type:      "process",
+		Enabled:   boolPtr(true),
+		CWD:       command.CWD,
+		Cmd:       command.Cmd,
+		AutoStart: boolPtr(true),
+	}
+	a.runtimeStreams[streamID] = cfg
+	if !containsString(a.runtimeStreamOrder, streamID) {
+		a.runtimeStreamOrder = append(a.runtimeStreamOrder, streamID)
+	}
+	a.streamLines[streamID] = nil
+	a.applyActiveStreams()
+}
+
+func (a *App) startCommandInStream(command detect.Command) {
+	a.startCommandAsStream(command, "cmd-stream:"+command.ID, command.Title)
+	a.streamsPane.SetOpen(true)
+	a.focus = paneStreams
+}
+
+func (a *App) startCommandInOutputPane(command detect.Command) {
+	streamID := "cmd-panel:" + command.ID
+	if a.commandOutputID != "" && a.commandOutputID != streamID {
+		a.removeRuntimeStream(a.commandOutputID)
+	}
+	a.commandOutputID = streamID
+	a.commandOutputPane.SetCommand(streamID, command.Title)
+	a.commandOutputPane.SetOpen(true)
+	a.startCommandAsStream(command, streamID, command.Title)
+	a.focus = paneCommandOutput
+}
+
+func (a *App) closeCommandOutputPane() {
+	if a.commandOutputID == "" {
+		a.commandOutputPane.Clear()
+		return
+	}
+	a.removeRuntimeStream(a.commandOutputID)
+	a.commandOutputID = ""
+	a.commandOutputPane.Clear()
+	if a.focus == paneCommandOutput {
+		a.focus = paneLog
+	}
+}
+
+func (a *App) removeRuntimeStream(id string) {
+	if id == "" {
+		return
+	}
+	delete(a.runtimeStreams, id)
+	delete(a.streamLines, id)
+	a.runtimeStreamOrder = removeString(a.runtimeStreamOrder, id)
+	if a.streams != nil {
+		_ = a.streams.Stop(id)
+		a.applyActiveStreams()
 	}
 }
 
@@ -544,6 +756,26 @@ func lastN(values []string, n int) []string {
 		return values
 	}
 	return values[len(values)-n:]
+}
+
+func containsString(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
+}
+
+func removeString(values []string, target string) []string {
+	out := values[:0]
+	for _, value := range values {
+		if value == target {
+			continue
+		}
+		out = append(out, value)
+	}
+	return out
 }
 
 func min(a, b int) int {

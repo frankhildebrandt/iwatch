@@ -18,12 +18,14 @@ import (
 
 type paneID string
 type appMode string
+type shutdownAction string
 
 const (
-	paneLog     paneID = "log"
-	paneCommand paneID = "commands"
-	paneEvents  paneID = "events"
-	paneStreams paneID = "streams"
+	paneLog           paneID = "log"
+	paneCommand       paneID = "commands"
+	paneCommandOutput paneID = "command-output"
+	paneEvents        paneID = "events"
+	paneStreams       paneID = "streams"
 
 	modeMain        appMode = "main"
 	modeConfig      appMode = "config"
@@ -32,6 +34,9 @@ const (
 	modeHelp        appMode = "help"
 	modeFields      appMode = "fields"
 	modeFieldFilter appMode = "field-filter"
+
+	shutdownQuit    shutdownAction = "quit"
+	shutdownRebuild shutdownAction = "rebuild"
 )
 
 // App coordinates the TUI, pane focus, and background runner/watch events.
@@ -49,6 +54,9 @@ type App struct {
 	fieldFilters         map[string]string
 	streamLines          map[string][]string
 	streamDetailID       string
+	runtimeStreams       map[string]config.StreamConfig
+	runtimeStreamOrder   []string
+	commandOutputID      string
 	pendingOutput        []runner.Event
 	outputFlushScheduled bool
 	logWindowLimit       int
@@ -58,25 +66,28 @@ type App struct {
 	focus  paneID
 	mode   appMode
 
-	logPane     *LogPane
-	commandPane *CommandPane
-	eventsPane  *EventsPane
-	streamsPane *StreamsPane
-	fieldMenu   *fieldMenu
-	filterMenu  *fieldFilterMenu
-	editor      *ConfigEditor
-	detail      *DetailView
-	help        *HelpView
+	logPane           *LogPane
+	commandPane       *CommandPane
+	commandOutputPane *CommandOutputPane
+	eventsPane        *EventsPane
+	streamsPane       *StreamsPane
+	fieldMenu         *fieldMenu
+	filterMenu        *fieldFilterMenu
+	editor            *ConfigEditor
+	detail            *DetailView
+	help              *HelpView
 
-	processStatus string
-	watchStatus   string
-	statusDetail  string
-	stale         bool
-	escCount      int
-	lastEsc       time.Time
-	lastEnter     time.Time
-	lastClick     time.Time
-	lastClickLine int
+	processStatus    string
+	watchStatus      string
+	statusDetail     string
+	shutdownState    shutdownAction
+	restartStreamIDs []string
+	stale            bool
+	escCount         int
+	lastEsc          time.Time
+	lastEnter        time.Time
+	lastClick        time.Time
+	lastClickLine    int
 }
 
 type tickMsg time.Time
@@ -85,6 +96,7 @@ type runnerMsg runner.Event
 type streamMsg stream.Event
 type watchMsg watch.Event
 type watchErrMsg struct{ err error }
+type shutdownDoneMsg struct{ action shutdownAction }
 
 // New creates the TUI model without starting the Bubble Tea program.
 func New(cfg config.Config, configPath string, commands []detect.Command, defaultCommand string, buf *buffer.LogBuffer, run *runner.Runner, watcher *watch.Watcher) *App {
@@ -99,7 +111,7 @@ func NewWithStreams(cfg config.Config, configPath string, commands []detect.Comm
 	}
 
 	focus := paneID(cfg.UI.FocusPane)
-	if focus != paneCommand && focus != paneEvents && focus != paneStreams {
+	if focus != paneCommand && focus != paneCommandOutput && focus != paneEvents && focus != paneStreams {
 		focus = paneLog
 	}
 
@@ -115,6 +127,7 @@ func NewWithStreams(cfg config.Config, configPath string, commands []detect.Comm
 		watcher:        watcher,
 		fieldFilters:   make(map[string]string),
 		streamLines:    make(map[string][]string),
+		runtimeStreams: make(map[string]config.StreamConfig),
 		logWindowLimit: logShortMemoryLines,
 		focus:          focus,
 		mode:           modeMain,
@@ -124,6 +137,7 @@ func NewWithStreams(cfg config.Config, configPath string, commands []detect.Comm
 
 	app.logPane = NewLogPane(cfg, buf)
 	app.commandPane = NewCommandPane(commands, cfg.UI.OpenPanes)
+	app.commandOutputPane = NewCommandOutputPane(cfg.UI.OpenPanes)
 	app.eventsPane = NewEventsPane(cfg.UI.OpenPanes)
 	app.streamsPane = NewStreamsPane(cfg.UI.OpenPanes)
 	app.fieldMenu = newFieldMenu()
@@ -200,6 +214,8 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case watchErrMsg:
 		a.eventsPane.Append("watch error: " + msg.err.Error())
 		return a, waitWatchError(a.watcher)
+	case shutdownDoneMsg:
+		return a.handleShutdownDone(msg)
 	}
 
 	if a.commandPane.IsOpen() {
