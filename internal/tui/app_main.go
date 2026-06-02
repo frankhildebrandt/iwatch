@@ -185,6 +185,17 @@ func (a *App) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "F":
 		a.mode = modeFieldFilter
 		a.filterMenu.ensureVisible(len(a.filterMenu.FilteredFields(a.buf.ObservedFields())), a.filterMenu.visibleRows(a.bodyHeight()))
+	case "b":
+		a.mode = modeGroup
+		a.groupMenu.ensureVisible(len(a.groupMenu.FilteredFields(a.buf.ObservedFields())), a.groupMenu.visibleRows(a.bodyHeight()))
+	case ",":
+		if a.focus == paneLog {
+			a.cycleGroupValue(-1)
+		}
+	case ".":
+		if a.focus == paneLog {
+			a.cycleGroupValue(1)
+		}
 	case "S":
 		if a.cfg.UI.SplitDirection == "horizontal" {
 			a.cfg.UI.SplitDirection = "vertical"
@@ -342,6 +353,38 @@ func (a *App) handleFieldFilterKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	default:
 		if msg.Type == tea.KeyRunes {
 			a.filterMenu.TypeFieldFilter(string(msg.Runes))
+		}
+	}
+	return a, nil
+}
+
+func (a *App) handleGroupKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	fields := a.buf.ObservedFields()
+	filtered := a.groupMenu.FilteredFields(fields)
+	a.groupMenu.ensureVisible(len(filtered), a.groupMenu.visibleRows(a.bodyHeight()))
+
+	switch msg.String() {
+	case "esc":
+		a.mode = modeMain
+		return a, nil
+	case "backspace":
+		a.groupMenu.Backspace()
+	case "ctrl+u":
+		a.groupMenu.ClearFilter()
+	case "up", "k":
+		a.groupMenu.Move(-1, len(filtered), a.groupMenu.visibleRows(a.bodyHeight()))
+	case "down", "j":
+		a.groupMenu.Move(1, len(filtered), a.groupMenu.visibleRows(a.bodyHeight()))
+	case " ", "enter":
+		field, ok := a.groupMenu.CurrentField(fields)
+		if !ok {
+			return a, nil
+		}
+		a.setGroupField(field)
+		a.mode = modeMain
+	default:
+		if msg.Type == tea.KeyRunes {
+			a.groupMenu.TypeFilter(string(msg.Runes))
 		}
 	}
 	return a, nil

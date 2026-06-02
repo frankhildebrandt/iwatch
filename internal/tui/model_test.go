@@ -495,6 +495,114 @@ func TestFieldMenuScrollsWhenManyFieldsExist(t *testing.T) {
 	}
 }
 
+func TestGroupFilterDefaultsShowAllLines(t *testing.T) {
+	buf, err := buffer.New(100, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	buf.Append("stdout", `level=INFO component=api msg="ready"`)
+	buf.Append("stdout", `level=ERROR component=api msg="bad"`)
+	buf.Append("stdout", `level=ERROR component=worker msg="bad"`)
+
+	app := New(config.Default(), "", []detect.Command{{ID: "cmd", Title: "Cmd", Cmd: "echo hi"}}, "cmd", buf, runner.New())
+	if app.groupField != config.DefaultGroupField {
+		t.Fatalf("groupField = %q, want %q", app.groupField, config.DefaultGroupField)
+	}
+	if app.groupValue != "" {
+		t.Fatalf("groupValue = %q, want empty", app.groupValue)
+	}
+	if got := len(app.snapshotLines()); got != 3 {
+		t.Fatalf("expected all lines visible, got %d", got)
+	}
+}
+
+func TestGroupValueCycleFiltersExactMatch(t *testing.T) {
+	buf, err := buffer.New(100, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	buf.Append("stdout", `level=INFO component=api msg="ready"`)
+	buf.Append("stdout", `level=ERROR component=api msg="bad"`)
+	buf.Append("stdout", `level=ERROR component=worker msg="bad"`)
+
+	app := New(config.Default(), "", []detect.Command{{ID: "cmd", Title: "Cmd", Cmd: "echo hi"}}, "cmd", buf, runner.New())
+	app.width = 100
+	app.height = 30
+	app.focus = paneLog
+
+	model, _ := app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'.'}})
+	app = model.(*App)
+	if got := len(app.snapshotLines()); got != 2 {
+		t.Fatalf("expected api group to leave 2 lines, got %d", got)
+	}
+	if got := app.groupValue; got != "api" {
+		t.Fatalf("groupValue = %q, want api", got)
+	}
+
+	model, _ = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'.'}})
+	app = model.(*App)
+	if got := len(app.snapshotLines()); got != 1 {
+		t.Fatalf("expected worker group to leave 1 line, got %d", got)
+	}
+	if got := app.groupValue; got != "worker" {
+		t.Fatalf("groupValue = %q, want worker", got)
+	}
+
+	model, _ = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'.'}})
+	app = model.(*App)
+	if got := len(app.snapshotLines()); got != 3 {
+		t.Fatalf("expected all group to restore 3 lines, got %d", got)
+	}
+	if app.groupValue != "" {
+		t.Fatalf("groupValue = %q, want empty", app.groupValue)
+	}
+}
+
+func TestGroupMenuSelectFieldResetsValue(t *testing.T) {
+	buf, err := buffer.New(100, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	buf.Append("stdout", `level=INFO component=api`)
+	buf.Append("stdout", `level=ERROR component=api`)
+
+	app := New(config.Default(), "", []detect.Command{{ID: "cmd", Title: "Cmd", Cmd: "echo hi"}}, "cmd", buf, runner.New())
+	app.width = 100
+	app.height = 30
+	app.groupValue = "api"
+
+	model, _ := app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'b'}})
+	app = model.(*App)
+	if app.mode != modeGroup {
+		t.Fatalf("expected group mode, got %s", app.mode)
+	}
+
+	for _, r := range []rune("level") {
+		model, _ = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		app = model.(*App)
+	}
+	model, _ = app.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	app = model.(*App)
+	if app.mode != modeMain {
+		t.Fatalf("expected main mode, got %s", app.mode)
+	}
+	if app.groupField != "level" {
+		t.Fatalf("groupField = %q, want level", app.groupField)
+	}
+	if app.groupValue != "" {
+		t.Fatalf("groupValue = %q, want empty after field change", app.groupValue)
+	}
+
+	model, _ = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'.'}})
+	app = model.(*App)
+	if got := len(app.snapshotLines()); got != 1 {
+		t.Fatalf("expected level=error filter to leave 1 line, got %d", got)
+	}
+	if app.groupValue != "error" {
+		t.Fatalf("groupValue = %q, want error", app.groupValue)
+	}
+}
+
 func TestFieldFilterDialogFiltersLiveWithANDLogic(t *testing.T) {
 	buf, err := buffer.New(100, nil)
 	if err != nil {

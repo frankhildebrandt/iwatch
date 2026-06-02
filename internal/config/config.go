@@ -16,6 +16,8 @@ const (
 	DefaultPresetID = "default"
 	// DefaultLogPalette is the fallback color palette for structural log text.
 	DefaultLogPalette = "default"
+	// DefaultGroupField is the default structured-log field used for grouping.
+	DefaultGroupField = "component"
 )
 
 // Config contains the persisted app configuration.
@@ -89,6 +91,7 @@ type LogViewConfig struct {
 	TimeFormat     string   `json:"timeFormat,omitempty"`
 	WrapMode       string   `json:"wrapMode,omitempty"`
 	Palette        string   `json:"palette,omitempty"`
+	GroupField     string   `json:"groupField,omitempty"`
 }
 
 // UIConfig contains TUI layout and preset settings.
@@ -364,6 +367,9 @@ func merge(base, override Config) Config {
 	if override.UI.LogView.Palette != "" {
 		out.UI.LogView.Palette = override.UI.LogView.Palette
 	}
+	if override.UI.LogView.GroupField != "" {
+		out.UI.LogView.GroupField = strings.ToLower(strings.TrimSpace(override.UI.LogView.GroupField))
+	}
 	return out
 }
 
@@ -395,6 +401,10 @@ func normalize(cfg Config) Config {
 	}
 	cfg.UI.LogView.VisibleFields = normalizeFieldNames(cfg.UI.LogView.VisibleFields)
 	cfg.UI.LogView.HiddenFields = normalizeFieldNames(cfg.UI.LogView.HiddenFields)
+	cfg.UI.LogView.GroupField = strings.ToLower(strings.TrimSpace(cfg.UI.LogView.GroupField))
+	if cfg.UI.LogView.GroupField == "" {
+		cfg.UI.LogView.GroupField = DefaultGroupField
+	}
 	if cfg.UI.LogView.ShowRawMessage == nil {
 		cfg.UI.LogView.ShowRawMessage = boolPtr(true)
 	}

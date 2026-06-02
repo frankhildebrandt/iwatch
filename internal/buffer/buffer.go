@@ -33,10 +33,17 @@ type ViewLine struct {
 	HighlightRule string
 }
 
+// GroupFilter restricts the snapshot to lines with an exact field value match.
+type GroupFilter struct {
+	Field string // empty disables grouping
+	Value string // empty means all values for Field
+}
+
 // SnapshotOptions describes how visible lines should be filtered and highlighted.
 type SnapshotOptions struct {
 	Preset       config.FilterPreset
 	Query        string
+	Group        GroupFilter
 	FieldFilters map[string]string
 	Highlights   []config.HighlightRule
 }
@@ -58,6 +65,12 @@ type LogBuffer struct {
 	cacheKey   string
 	cacheVer   uint64
 	cacheLines []ViewLine
+	cachePreset       parsedPreset
+	cacheRuntimeQuery parsedQuery
+	cacheGroupFilter  parsedGroupFilter
+	cacheFieldFilters parsedFieldFilters
+	cacheCompiled     []compiledRule
+	fieldValueCounts  map[string]map[string]int
 }
 
 type compiledRule struct {
@@ -77,10 +90,11 @@ func New(capacity int, rules []config.HighlightRule) (*LogBuffer, error) {
 	}
 
 	return &LogBuffer{
-		capacity:   capacity,
-		lines:    make([]Line, 0, min(capacity, 1024)),
-		fieldSet: make(map[string]struct{}),
-		baseRules:  append([]config.HighlightRule(nil), rules...),
+		capacity:         capacity,
+		lines:            make([]Line, 0, min(capacity, 1024)),
+		fieldSet:         make(map[string]struct{}),
+		baseRules:        append([]config.HighlightRule(nil), rules...),
+		fieldValueCounts: make(map[string]map[string]int),
 	}, nil
 }
 
@@ -116,17 +130,28 @@ func (b *LogBuffer) AppendLine(source, text string) Line {
 	}
 	b.nextIdx++
 	b.version++
-	b.cacheKey = ""
-	b.cacheLines = nil
 	b.recordObservedFields(fieldKeys)
 
 	if len(b.lines) == b.capacity {
+		evictedLine := b.lines[b.start]
+		b.removeFieldValues(evictedLine)
+		if b.cacheKey != "" {
+			b.removeFromSnapshotCache(evictedLine.Index)
+		}
 		b.lines[b.start] = line
 		b.start = (b.start + 1) % b.capacity
-		return line
+	} else {
+		b.lines = append(b.lines, line)
 	}
 
-	b.lines = append(b.lines, line)
+	b.recordFieldValues(line)
+	if b.cacheKey != "" {
+		b.cacheVer = b.version
+		if b.lineMatchesCacheFilters(line) {
+			b.appendToSnapshotCache(line)
+		}
+	}
+
 	return line
 }
 
@@ -139,8 +164,8 @@ func (b *LogBuffer) Truncate() {
 	b.lines = b.lines[:0]
 	b.start = 0
 	b.version++
-	b.cacheKey = ""
-	b.cacheLines = nil
+	b.fieldValueCounts = make(map[string]map[string]int)
+	b.invalidateSnapshotCache()
 }
 
 // ObservedFields returns all logfmt keys seen so far in first-seen order.
@@ -151,31 +176,75 @@ func (b *LogBuffer) ObservedFields() []string {
 	return append([]string(nil), b.fieldOrder...)
 }
 
+// DistinctFieldValues returns sorted unique values for field across buffered lines.
+func (b *LogBuffer) DistinctFieldValues(field string) []string {
+	field = strings.ToLower(strings.TrimSpace(field))
+	if field == "" {
+		return nil
+	}
+
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+
+	counts, ok := b.fieldValueCounts[field]
+	if !ok || len(counts) == 0 {
+		return nil
+	}
+
+	out := make([]string, 0, len(counts))
+	for value := range counts {
+		out = append(out, value)
+	}
+	sort.Strings(out)
+	return out
+}
+
 // Snapshot returns the currently visible lines for the supplied query and preset.
+// The returned slice is read-only and remains valid until the next buffer mutation.
 func (b *LogBuffer) Snapshot(opts SnapshotOptions) []ViewLine {
 	presetQuery := parsePreset(opts.Preset)
 	runtimeQuery := parseQuery(opts.Query)
+	groupFilter := parseGroupFilter(opts.Group)
 	fieldFilters := parseFieldFilters(opts.FieldFilters)
 	rules := opts.Highlights
 	if len(rules) == 0 {
 		rules = b.baseRules
 	}
 	compiled, _ := b.rulesFor(rules)
+	key := snapshotCacheKey(opts, rules)
 
 	b.mu.RLock()
-	defer b.mu.RUnlock()
+	if key == b.cacheKey && b.cacheVer == b.version && b.cacheLines != nil {
+		lines := b.cacheLines
+		b.mu.RUnlock()
+		return lines
+	}
+	b.mu.RUnlock()
 
-	key := snapshotCacheKey(opts, rules)
-	if key == b.cacheKey && b.cacheVer == b.version {
-		return cloneViewLines(b.cacheLines)
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	if key == b.cacheKey && b.cacheVer == b.version && b.cacheLines != nil {
+		return b.cacheLines
 	}
 
-	out := b.fullSnapshot(presetQuery, runtimeQuery, fieldFilters, compiled)
-
+	out := b.fullSnapshot(presetQuery, runtimeQuery, groupFilter, fieldFilters, compiled)
 	b.cacheKey = key
 	b.cacheVer = b.version
-	b.cacheLines = cloneViewLines(out)
+	b.cacheLines = out
+	b.cachePreset = presetQuery
+	b.cacheRuntimeQuery = runtimeQuery
+	b.cacheGroupFilter = groupFilter
+	b.cacheFieldFilters = fieldFilters
+	b.cacheCompiled = compiled
 	return out
+}
+
+// SnapshotLinePosition returns the snapshot slice index for a buffered line index.
+func (b *LogBuffer) SnapshotLinePosition(lineIndex int) (int, bool) {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return snapshotLineIndex(b.cacheLines, lineIndex)
 }
 
 // Len returns the number of buffered lines.
@@ -192,11 +261,11 @@ func (b *LogBuffer) lineAt(index int) Line {
 	return b.lines[(b.start+index)%b.capacity]
 }
 
-func (b *LogBuffer) fullSnapshot(presetQuery parsedPreset, runtimeQuery parsedQuery, fieldFilters parsedFieldFilters, compiled []compiledRule) []ViewLine {
+func (b *LogBuffer) fullSnapshot(presetQuery parsedPreset, runtimeQuery parsedQuery, groupFilter parsedGroupFilter, fieldFilters parsedFieldFilters, compiled []compiledRule) []ViewLine {
 	out := make([]ViewLine, 0, len(b.lines))
 	for idx := 0; idx < len(b.lines); idx++ {
 		line := b.lineAt(idx)
-		if !presetQuery.matches(line) || !runtimeQuery.matches(line) || !fieldFilters.matches(line) {
+		if !presetQuery.matches(line) || !runtimeQuery.matches(line) || !groupFilter.matches(line) || !fieldFilters.matches(line) {
 			continue
 		}
 		view := ViewLine{Line: line}
@@ -220,9 +289,19 @@ func snapshotCacheKey(opts SnapshotOptions, rules []config.HighlightRule) string
 	return strings.Join([]string{
 		opts.Query,
 		presetKey(opts.Preset),
+		groupFilterKey(opts.Group),
 		fieldFiltersKey(opts.FieldFilters),
 		rulesKey(rules),
 	}, "\x00")
+}
+
+func groupFilterKey(filter GroupFilter) string {
+	field := strings.ToLower(strings.TrimSpace(filter.Field))
+	value := strings.ToLower(strings.TrimSpace(filter.Value))
+	if field == "" || value == "" {
+		return ""
+	}
+	return field + "=" + value
 }
 
 func presetKey(preset config.FilterPreset) string {
@@ -263,8 +342,87 @@ func fieldFiltersKey(filters map[string]string) string {
 	return builder.String()
 }
 
-func cloneViewLines(lines []ViewLine) []ViewLine {
-	return append([]ViewLine(nil), lines...)
+func (b *LogBuffer) invalidateSnapshotCache() {
+	b.cacheKey = ""
+	b.cacheLines = nil
+	b.cacheVer = 0
+}
+
+func (b *LogBuffer) lineMatchesCacheFilters(line Line) bool {
+	return b.cachePreset.matches(line) &&
+		b.cacheRuntimeQuery.matches(line) &&
+		b.cacheGroupFilter.matches(line) &&
+		b.cacheFieldFilters.matches(line)
+}
+
+func (b *LogBuffer) appendToSnapshotCache(line Line) {
+	view := ViewLine{Line: line}
+	view.HighlightRule = matchRule(b.cacheCompiled, line.Text)
+	b.cacheLines = append(b.cacheLines, view)
+}
+
+func (b *LogBuffer) removeFromSnapshotCache(lineIndex int) {
+	pos, ok := snapshotLineIndex(b.cacheLines, lineIndex)
+	if !ok {
+		return
+	}
+	if pos == 0 {
+		b.cacheLines = b.cacheLines[1:]
+		return
+	}
+	b.cacheLines = append(b.cacheLines[:pos], b.cacheLines[pos+1:]...)
+}
+
+func snapshotLineIndex(lines []ViewLine, lineIndex int) (int, bool) {
+	if len(lines) == 0 {
+		return 0, false
+	}
+	lo, hi := 0, len(lines)-1
+	for lo <= hi {
+		mid := (lo + hi) / 2
+		switch {
+		case lines[mid].Index == lineIndex:
+			return mid, true
+		case lines[mid].Index < lineIndex:
+			lo = mid + 1
+		default:
+			hi = mid - 1
+		}
+	}
+	return 0, false
+}
+
+func (b *LogBuffer) recordFieldValues(line Line) {
+	for field, value := range line.Fields {
+		if value == "" {
+			continue
+		}
+		counts, ok := b.fieldValueCounts[field]
+		if !ok {
+			counts = make(map[string]int)
+			b.fieldValueCounts[field] = counts
+		}
+		counts[value]++
+	}
+}
+
+func (b *LogBuffer) removeFieldValues(line Line) {
+	for field, value := range line.Fields {
+		if value == "" {
+			continue
+		}
+		counts, ok := b.fieldValueCounts[field]
+		if !ok {
+			continue
+		}
+		counts[value]--
+		if counts[value] <= 0 {
+			delete(counts, value)
+		}
+		if len(counts) == 0 {
+			delete(b.fieldValueCounts, field)
+		}
+	}
 }
 
 func (b *LogBuffer) rulesFor(rules []config.HighlightRule) ([]compiledRule, error) {
@@ -352,6 +510,11 @@ type parsedFieldFilters struct {
 	terms []queryTerm
 }
 
+type parsedGroupFilter struct {
+	field string
+	value string
+}
+
 type queryTerm struct {
 	key   string
 	value string
@@ -424,6 +587,21 @@ func parseFieldFilters(filters map[string]string) parsedFieldFilters {
 		terms = append(terms, queryTerm{key: key, value: value})
 	}
 	return parsedFieldFilters{terms: terms}
+}
+
+func parseGroupFilter(filter GroupFilter) parsedGroupFilter {
+	return parsedGroupFilter{
+		field: strings.ToLower(strings.TrimSpace(filter.Field)),
+		value: strings.ToLower(strings.TrimSpace(filter.Value)),
+	}
+}
+
+func (g parsedGroupFilter) matches(line Line) bool {
+	if g.field == "" || g.value == "" {
+		return true
+	}
+	lineValue, ok := line.Fields[g.field]
+	return ok && lineValue == g.value
 }
 
 func (q parsedQuery) matches(line Line) bool {

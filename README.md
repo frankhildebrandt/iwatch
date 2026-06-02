@@ -40,6 +40,8 @@ iwatch --config ./.iwatch.config.json
 - `w`: Events-Pane oeffnen (Streams, Automations, Config)
 - `v`: Logfeld-Menue oeffnen, per Tippen filtern und erkannte logfmt-Felder ein-/ausblenden
 - `F`: Live-Feldfilter oeffnen, Felder waehlen und per Contains-Wert filtern
+- `b`: Gruppierungsfeld waehlen (Standard: `component`)
+- `,` / `.`: Gruppierungswert vor/zurueck durchschalten (inkl. alle Werte)
 - `g`: Fullscreen-Config-Editor oeffnen
 - `[` / `]` oder `left/right`: zwischen konfigurierten Presets umschalten
 - `tab`: Fokus zwischen offenen Panes wechseln
@@ -71,6 +73,8 @@ iwatch --config ./.iwatch.config.json
 Die Bottom-Query wirkt zusaetzlich auf das aktive Preset. Strukturierte OR-Filter werden in der Config-Datei ueber Presets gepflegt.
 
 Der Live-Feldfilter unter `F` wirkt nur fuer die laufende Sitzung. Mehrere gesetzte Feldfilter werden mit `AND` kombiniert und matchen case-insensitive per Contains gegen erkannte logfmt-Felder.
+
+Die Gruppierung filtert live nach einem strukturierten Feld (Default `component`, konfigurierbar als `ui.logView.groupField`). `,` und `.` schalten exakte Werte dieses Feldes durch (inkl. „alle“). Das ist getrennt vom Contains-Feldfilter unter `F` und kombiniert sich per `AND` mit Preset, Query und Feldfiltern.
 
 ## Structured Logging (logfmt + JSON Lines)
 
@@ -229,4 +233,5 @@ Beispiel:
   In `default` wird die Zeit dunkelgrau, der logfmt-Key hellgrau und der Wert weiss gerendert.
 - `visibleFields`: steuert die bevorzugte Reihenfolge erkannter logfmt-Felder; neue Felder werden automatisch angehaengt
 - `hiddenFields`: blendet erkannte logfmt-Felder aus; das Feld-Menue schreibt diese Liste erst nach explizitem Speichern in die Config
+- `groupField`: Standard-Gruppierungsfeld fuer `b` und `,`/`.` (Default: `component`)
 - Root-`highlightRules` bleiben als Rueckwaertskompatibilitaets-Fallback aktiv, wenn ein Preset keine eigenen Regeln hat

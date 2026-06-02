@@ -30,6 +30,7 @@ const (
 	modeHelp        appMode = "help"
 	modeFields      appMode = "fields"
 	modeFieldFilter appMode = "field-filter"
+	modeGroup       appMode = "group"
 
 	shutdownQuit    shutdownAction = "quit"
 	shutdownRebuild shutdownAction = "rebuild"
@@ -46,6 +47,8 @@ type App struct {
 	runner               *runner.Runner
 	streams              *stream.Supervisor
 	fieldFilters         map[string]string
+	groupField           string
+	groupValue           string
 	streamLines          map[string][]string
 	streamDetailID       string
 	runtimeStreams       map[string]config.StreamConfig
@@ -63,6 +66,7 @@ type App struct {
 	streamsPane *StreamsPane
 	fieldMenu   *fieldMenu
 	filterMenu  *fieldFilterMenu
+	groupMenu   *groupMenu
 	editor      *ConfigEditor
 	detail      *DetailView
 	help        *HelpView
@@ -84,7 +88,6 @@ type App struct {
 	viteURL    string
 }
 
-type tickMsg time.Time
 type outputFlushMsg time.Time
 type runnerMsg runner.Event
 type streamMsg stream.Event
@@ -123,6 +126,7 @@ func NewWithStreams(cfg config.Config, configPath string, commands []detect.Comm
 		runner:         run,
 		streams:        streams,
 		fieldFilters:   make(map[string]string),
+		groupField:     defaultGroupField(cfg),
 		streamLines:    make(map[string][]string),
 		runtimeStreams: make(map[string]config.StreamConfig),
 		focus: focus,
@@ -136,6 +140,7 @@ func NewWithStreams(cfg config.Config, configPath string, commands []detect.Comm
 	app.streamsPane = NewStreamsPane(cfg.UI.OpenPanes)
 	app.fieldMenu = newFieldMenu()
 	app.filterMenu = newFieldFilterMenu()
+	app.groupMenu = newGroupMenu()
 	app.editor = NewConfigEditor(configPath)
 	app.detail = NewDetailView()
 	app.help = NewHelpView()
@@ -145,9 +150,9 @@ func NewWithStreams(cfg config.Config, configPath string, commands []detect.Comm
 	return app
 }
 
-// Init starts the background tick, runner, and stream integration.
+// Init starts the background runner and stream integration.
 func (a *App) Init() tea.Cmd {
-	cmds := []tea.Cmd{tickCmd(), a.startInitialRun()}
+	cmds := []tea.Cmd{a.startInitialRun()}
 	a.applyActiveStreams()
 	cmds = append(cmds, waitRunnerEvent(a.runner))
 	if a.streams != nil {
@@ -181,17 +186,14 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a.handleFieldKey(msg)
 		case modeFieldFilter:
 			return a.handleFieldFilterKey(msg)
+		case modeGroup:
+			return a.handleGroupKey(msg)
 		default:
 			return a.handleMainKey(msg)
 		}
 	case shareResultMsg:
 		a.share.ApplyResult(msg)
 		return a, nil
-	case tickMsg:
-		if time.Since(a.lastEsc) > 2*time.Second {
-			a.escCount = 0
-		}
-		return a, tickCmd()
 	case outputFlushMsg:
 		a.outputFlushScheduled = false
 		a.flushPendingOutput()
@@ -247,23 +249,38 @@ func (a *App) View() string {
 			),
 			a.filterMenu.InputBar(),
 		)
+	case modeGroup:
+		return lipgloss.JoinVertical(
+			lipgloss.Left,
+			lipgloss.Place(
+				a.width,
+				a.bodyHeight(),
+				lipgloss.Center,
+				lipgloss.Center,
+				a.groupMenu.View(a.width, a.bodyHeight(), a.buf.ObservedFields(), a.groupField),
+			),
+			a.groupMenu.InputBar(),
+		)
 	}
 
 	bodyHeight := a.bodyHeight()
 	lines := a.snapshotLines()
 	observed := a.buf.ObservedFields()
+	ctx := a.logPaneContext()
+	logView := a.cfg.UI.LogView
+	logFocused := a.focus == paneLog
 
-	main := a.logPane.View(a.width, bodyHeight, a.focus == paneLog, lines, observed, a.cfg.UI.LogView, a.logPaneContext())
 	side := a.renderSidePanes(max(30, a.width/3), bodyHeight)
 
 	var body string
 	if side == "" {
-		body = main
+		body = a.logPane.View(a.width, bodyHeight, logFocused, lines, observed, logView, ctx)
 	} else if a.cfg.UI.SplitDirection == "horizontal" {
+		main := a.logPane.View(a.width, bodyHeight, logFocused, lines, observed, logView, ctx)
 		body = lipgloss.JoinVertical(lipgloss.Left, main, side)
 	} else {
 		mainWidth := a.width - max(30, a.width/3)
-		body = lipgloss.JoinHorizontal(lipgloss.Top, a.logPane.View(mainWidth, bodyHeight, a.focus == paneLog, lines, observed, a.cfg.UI.LogView, a.logPaneContext()), side)
+		body = lipgloss.JoinHorizontal(lipgloss.Top, a.logPane.View(mainWidth, bodyHeight, logFocused, lines, observed, logView, ctx), side)
 	}
 
 	return lipgloss.JoinVertical(lipgloss.Left, body, a.inputBar())

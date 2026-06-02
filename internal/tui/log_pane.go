@@ -224,14 +224,12 @@ func (p *LogPane) displayCursor(lines []buffer.ViewLine) int {
 	if len(lines) == 0 {
 		return 0
 	}
-	cursor := p.cursor
 	if p.anchorLineIndex >= 0 {
-		for idx, line := range lines {
-			if line.Index == p.anchorLineIndex {
-				return idx
-			}
+		if pos, ok := p.buf.SnapshotLinePosition(p.anchorLineIndex); ok {
+			return pos
 		}
 	}
+	cursor := p.cursor
 	if cursor >= len(lines) {
 		cursor = len(lines) - 1
 	}
@@ -248,11 +246,9 @@ func (p *LogPane) resolveCursorLine(lines []buffer.ViewLine) {
 		return
 	}
 	if p.anchorLineIndex >= 0 {
-		for idx, line := range lines {
-			if line.Index == p.anchorLineIndex {
-				p.cursor = idx
-				return
-			}
+		if pos, ok := p.buf.SnapshotLinePosition(p.anchorLineIndex); ok {
+			p.cursor = pos
+			return
 		}
 	}
 	if p.cursor >= len(lines) {
@@ -284,11 +280,21 @@ func (p *LogPane) visibleRange(width, height int, lines []buffer.ViewLine, obser
 	start := max(0, min(p.viewportTop, len(lines)-1))
 	usedRows := 0
 	end := start
+	heightCache := make(map[int]int)
+	lineHeight := func(idx int) int {
+		if cached, ok := heightCache[idx]; ok {
+			return cached
+		}
+		h := p.lineHeight(lines[idx], idx, width, observed, view)
+		heightCache[idx] = h
+		return h
+	}
+
 	for idx := start; idx < len(lines); idx++ {
 		if !p.autoScroll && p.frozenViewportEnd > 0 && idx >= p.frozenViewportEnd {
 			break
 		}
-		lineRows := p.lineHeight(lines[idx], idx, width, observed, view)
+		lineRows := lineHeight(idx)
 		if idx > start && usedRows+lineRows > contentRows {
 			break
 		}
@@ -399,6 +405,7 @@ func (p *LogPane) ensureCursorVisible(width, height int, lines []buffer.ViewLine
 		return
 	}
 
+	contentRows := max(1, height-3)
 	start, end := p.visibleRange(width, height, lines, observed, view)
 	if p.cursor < start {
 		p.viewportTop = p.cursor
@@ -408,15 +415,17 @@ func (p *LogPane) ensureCursorVisible(width, height int, lines []buffer.ViewLine
 		return
 	}
 
-	for top := start + 1; top < len(lines); top++ {
-		p.viewportTop = top
-		start, end = p.visibleRange(width, height, lines, observed, view)
-		if p.cursor >= start && p.cursor < end {
-			return
+	top := p.cursor
+	usedRows := p.lineHeight(lines[top], top, width, observed, view)
+	for top > 0 {
+		prevRows := p.lineHeight(lines[top-1], top-1, width, observed, view)
+		if usedRows+prevRows > contentRows {
+			break
 		}
+		top--
+		usedRows += prevRows
 	}
-
-	p.viewportTop = p.cursor
+	p.viewportTop = top
 }
 
 // pinFrozenViewport records the visible window while tail-follow is paused.

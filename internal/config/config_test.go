@@ -108,6 +108,28 @@ func TestLogViewPaletteDefaults(t *testing.T) {
 	}
 }
 
+func TestLogViewGroupFieldDefaults(t *testing.T) {
+	cfg := DefaultMerge(Config{})
+	if cfg.UI.LogView.GroupField != DefaultGroupField {
+		t.Fatalf("GroupField = %q, want %q", cfg.UI.LogView.GroupField, DefaultGroupField)
+	}
+
+	cfg = DefaultMerge(Config{
+		UI: UIConfig{
+			LogView: LogViewConfig{GroupField: " Level "},
+		},
+	})
+	if cfg.UI.LogView.GroupField != "level" {
+		t.Fatalf("GroupField = %q, want level", cfg.UI.LogView.GroupField)
+	}
+
+	cloned := Clone(cfg)
+	cloned.UI.LogView.GroupField = "changed"
+	if cfg.UI.LogView.GroupField != "level" {
+		t.Fatalf("Clone() shared GroupField: %q", cfg.UI.LogView.GroupField)
+	}
+}
+
 func TestLogViewPaletteNormalizesInvalidValues(t *testing.T) {
 	cfg := DefaultMerge(Config{
 		UI: UIConfig{

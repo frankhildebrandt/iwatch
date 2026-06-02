@@ -50,6 +50,8 @@ func keymapSections() []keymapSection {
 				{Keys: "w", Description: "Events-Pane oeffnen/schliessen"},
 				{Keys: "l", Description: "Streams-Pane oeffnen/schliessen"},
 				{Keys: "v", Description: "Logfelder ein-/ausblenden"},
+				{Keys: "b", Description: "Gruppierungsfeld waehlen"},
+				{Keys: ", / .", Description: "Gruppierungswert vor/zurueck (inkl. alle)"},
 				{Keys: "F", Description: "Live-Feldfilter oeffnen"},
 				{Keys: "g", Description: "Config-Editor oeffnen"},
 				{Keys: "o in Streams", Description: "Stream-Details oeffnen"},

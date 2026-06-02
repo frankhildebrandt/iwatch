@@ -88,6 +88,9 @@ func (a *App) inputBar() string {
 		label = "log paused"
 	}
 	bar := fmt.Sprintf("%s> %s | %s", label, value, keys)
+	if a.mode == modeMain && a.groupField != "" {
+		bar = fmt.Sprintf("%s | %s", bar, a.groupStatusLabel())
+	}
 	return lipgloss.NewStyle().
 		Padding(0, 1).
 		Background(lipgloss.Color("236")).
@@ -122,6 +125,8 @@ func (a *App) inputBarHints() string {
 			return "filter value> type [enter] done [esc] back [ctrl+u] clear"
 		}
 		return "field filters> type field [enter] edit [esc] close"
+	case modeGroup:
+		return "group> type filter [space/enter] select [esc] close"
 	}
 
 	// Main mode, focus-aware.
@@ -132,10 +137,76 @@ func (a *App) inputBarHints() string {
 		return "[tab] focus [?] help"
 	default:
 		if a.viteURL != "" {
-			return "[j/k] nav [/] query [l] streams [w] events [y] share [O] open [?] help [q] quit"
+			return "[j/k] nav [/] query [,/.] group [b] group field [l] streams [w] events [y] share [O] open [?] help [q] quit"
 		}
-		return "[j/k] nav [/] query [l] streams [w] events [y] share [?] help [q] quit"
+		return "[j/k] nav [/] query [,/.] group [b] group field [l] streams [w] events [y] share [?] help [q] quit"
 	}
+}
+
+func defaultGroupField(cfg config.Config) string {
+	field := strings.ToLower(strings.TrimSpace(cfg.UI.LogView.GroupField))
+	if field == "" {
+		return config.DefaultGroupField
+	}
+	return field
+}
+
+func (a *App) groupCycleValues() []string {
+	if a.groupField == "" {
+		return []string{""}
+	}
+	distinct := a.buf.DistinctFieldValues(a.groupField)
+	values := make([]string, 0, 1+len(distinct))
+	values = append(values, "")
+	values = append(values, distinct...)
+	return values
+}
+
+func (a *App) groupStatusLabel() string {
+	values := a.groupCycleValues()
+	idx := 0
+	for i, value := range values {
+		if value == a.groupValue {
+			idx = i
+			break
+		}
+	}
+	label := "<alle>"
+	if a.groupValue != "" {
+		label = a.groupValue
+	}
+	return fmt.Sprintf("group: %s=%s (%d/%d)", a.groupField, label, idx+1, len(values))
+}
+
+func (a *App) cycleGroupValue(delta int) {
+	values := a.groupCycleValues()
+	if len(values) == 0 {
+		return
+	}
+	current := 0
+	for idx, value := range values {
+		if value == a.groupValue {
+			current = idx
+			break
+		}
+	}
+	next := (current + delta + len(values)) % len(values)
+	a.groupValue = values[next]
+	lines := a.snapshotLines()
+	a.logPane.refreshQueryState(a.logPane.autoScroll, lines)
+	a.syncLogViewport(lines)
+}
+
+func (a *App) setGroupField(field string) {
+	field = strings.ToLower(strings.TrimSpace(field))
+	if field == "" {
+		return
+	}
+	a.groupField = field
+	a.groupValue = ""
+	lines := a.snapshotLines()
+	a.logPane.refreshQueryState(a.logPane.autoScroll, lines)
+	a.syncLogViewport(lines)
 }
 
 func (a *App) openLineDetail() {
@@ -166,7 +237,7 @@ func (a *App) openShareForDetail(fieldsOnly bool) {
 		return
 	}
 	line := *a.detail.line
-	a.openShare(shareBundleForDetailLine(line, a.logPaneContext(), a.logPane.query, a.fieldFilters, a.cfg, fieldsOnly))
+	a.openShare(shareBundleForDetailLine(line, a.logPaneContext(), a.logPane.query, a.fieldFilters, a.groupField, a.groupValue, a.cfg, fieldsOnly))
 }
 
 func (a *App) openLineDetailAt(index int, lines []buffer.ViewLine) {
@@ -227,6 +298,7 @@ func (a *App) snapshotLines() []buffer.ViewLine {
 	return a.buf.Snapshot(buffer.SnapshotOptions{
 		Preset:       preset,
 		Query:        a.logPane.query,
+		Group:        buffer.GroupFilter{Field: a.groupField, Value: a.groupValue},
 		FieldFilters: cloneFieldFilters(a.fieldFilters),
 		Highlights:   highlights,
 	})
@@ -262,6 +334,9 @@ func (a *App) shareBundleForLine(line buffer.ViewLine, lines []buffer.ViewLine, 
 		for _, key := range keys {
 			builder.WriteString(fmt.Sprintf("  - %s contains %q\n", key, a.fieldFilters[key]))
 		}
+	}
+	if a.groupField != "" && a.groupValue != "" {
+		builder.WriteString(fmt.Sprintf("group: %s=%s\n", a.groupField, a.groupValue))
 	}
 	builder.WriteString(fmt.Sprintf("time: %s\n", time.Now().Format(time.RFC3339)))
 	builder.WriteString("\nselected:\n")
@@ -300,7 +375,7 @@ func (a *App) shareBundleForLine(line buffer.ViewLine, lines []buffer.ViewLine, 
 	return builder.String()
 }
 
-func shareBundleForDetailLine(line buffer.ViewLine, ctx logPaneContext, query string, fieldFilters map[string]string, cfg config.Config, fieldsOnly bool) string {
+func shareBundleForDetailLine(line buffer.ViewLine, ctx logPaneContext, query string, fieldFilters map[string]string, groupField, groupValue string, cfg config.Config, fieldsOnly bool) string {
 	preset := activePreset(cfg)
 	builder := strings.Builder{}
 	builder.WriteString("iwatch share v1\n")
@@ -317,6 +392,9 @@ func shareBundleForDetailLine(line buffer.ViewLine, ctx logPaneContext, query st
 		for _, key := range keys {
 			builder.WriteString(fmt.Sprintf("  - %s contains %q\n", key, fieldFilters[key]))
 		}
+	}
+	if groupField != "" && groupValue != "" {
+		builder.WriteString(fmt.Sprintf("group: %s=%s\n", groupField, groupValue))
 	}
 	builder.WriteString(fmt.Sprintf("time: %s\n", time.Now().Format(time.RFC3339)))
 	builder.WriteString("\nselected:\n")
@@ -644,12 +722,6 @@ func waitStreamEvent(streams *stream.Supervisor) tea.Cmd {
 		ev := <-streams.Events()
 		return streamMsg(ev)
 	}
-}
-
-func tickCmd() tea.Cmd {
-	return tea.Tick(500*time.Millisecond, func(t time.Time) tea.Msg {
-		return tickMsg(t)
-	})
 }
 
 func outputFlushCmd() tea.Cmd {
