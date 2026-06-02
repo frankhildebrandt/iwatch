@@ -21,7 +21,7 @@ type logPaneContext struct {
 	CommandTitle  string
 	PresetTitle   string
 	ProcessStatus string
-	WatchStatus   string
+	AppStatus     string
 	StatusDetail  string
 	BufferLen     int
 	BufferCap     int
@@ -36,10 +36,13 @@ type LogPane struct {
 	queryInput  textinput.Model
 	query       string
 	matchCursor int
-	cursor      int
-	viewportTop int
-	selecting   bool
-	autoScroll  bool
+	cursor             int
+	viewportTop        int
+	anchorLineIndex    int
+	frozenViewportEnd  int
+	selecting          bool
+	// autoScroll follows the snapshot tail so new ring-buffer lines stay visible.
+	autoScroll bool
 }
 
 // NewLogPane creates the primary log pane state from the current config.
@@ -51,8 +54,9 @@ func NewLogPane(cfg config.Config, buf *buffer.LogBuffer) *LogPane {
 	return &LogPane{
 		buf:         buf,
 		queryInput:  queryInput,
-		matchCursor: -1,
-		autoScroll:  true,
+		matchCursor:     -1,
+		anchorLineIndex: -1,
+		autoScroll:      true,
 	}
 }
 
@@ -95,7 +99,7 @@ func (p *LogPane) View(width, height int, focused bool, lines []buffer.ViewLine,
 // InputBar is rendered by App to stay mode-/focus-aware.
 
 func (p *LogPane) renderHeader(ctx logPaneContext) string {
-	info := fmt.Sprintf("cmd: %s | preset: %s | run: %s | watch: %s | streams: %d | buffer: %d/%d", ctx.CommandTitle, ctx.PresetTitle, ctx.ProcessStatus, ctx.WatchStatus, ctx.StreamCount, ctx.BufferLen, ctx.BufferCap)
+	info := fmt.Sprintf("cmd: %s | preset: %s | run: %s | status: %s | streams: %d | buffer: %d/%d", ctx.CommandTitle, ctx.PresetTitle, ctx.ProcessStatus, ctx.AppStatus, ctx.StreamCount, ctx.BufferLen, ctx.BufferCap)
 	if ctx.StatusDetail != "" {
 		info += " | " + ctx.StatusDetail
 	}
@@ -192,13 +196,46 @@ func (p *LogPane) refreshQueryState(followTail bool, lines []buffer.ViewLine) {
 		p.autoScroll = true
 		return
 	}
-	if followTail {
+	if followTail && !p.selecting {
 		p.autoScroll = true
+		p.anchorLineIndex = -1
 		p.cursor = len(lines) - 1
 		if p.query != "" {
 			p.matchCursor = p.cursor
 		}
 		return
+	}
+	p.resolveCursorLine(lines)
+	if p.query != "" {
+		p.matchCursor = p.cursor
+	} else {
+		p.matchCursor = -1
+	}
+	p.syncAutoScroll(lines)
+}
+
+// bindCursorLine records the ring-buffer line index for the current cursor.
+func (p *LogPane) bindCursorLine(lines []buffer.ViewLine) {
+	if len(lines) == 0 || p.cursor < 0 || p.cursor >= len(lines) {
+		p.anchorLineIndex = -1
+		return
+	}
+	p.anchorLineIndex = lines[p.cursor].Index
+}
+
+// resolveCursorLine maps the anchored ring-buffer line back into the current snapshot.
+func (p *LogPane) resolveCursorLine(lines []buffer.ViewLine) {
+	if len(lines) == 0 {
+		p.cursor = 0
+		return
+	}
+	if p.anchorLineIndex >= 0 {
+		for idx, line := range lines {
+			if line.Index == p.anchorLineIndex {
+				p.cursor = idx
+				return
+			}
+		}
 	}
 	if p.cursor >= len(lines) {
 		p.cursor = len(lines) - 1
@@ -206,12 +243,6 @@ func (p *LogPane) refreshQueryState(followTail bool, lines []buffer.ViewLine) {
 	if p.cursor < 0 {
 		p.cursor = 0
 	}
-	if p.query != "" {
-		p.matchCursor = p.cursor
-	} else {
-		p.matchCursor = -1
-	}
-	p.syncAutoScroll(lines)
 }
 
 func (p *LogPane) moveCursor(delta int) {
@@ -236,7 +267,10 @@ func (p *LogPane) visibleRange(width, height int, lines []buffer.ViewLine, obser
 	usedRows := 0
 	end := start
 	for idx := start; idx < len(lines); idx++ {
-		lineRows := p.lineHeight(lines[idx], width, observed, view)
+		if !p.autoScroll && p.frozenViewportEnd > 0 && idx >= p.frozenViewportEnd {
+			break
+		}
+		lineRows := p.lineHeight(lines[idx], idx, width, observed, view)
 		if idx > start && usedRows+lineRows > contentRows {
 			break
 		}
@@ -262,7 +296,7 @@ func (p *LogPane) lineIndexAt(y, width, height int, lines []buffer.ViewLine, obs
 	start, end := p.visibleRange(width, height, lines, observed, view)
 	row := 0
 	for idx := start; idx < end; idx++ {
-		renderedHeight := p.lineHeight(lines[idx], width, observed, view)
+		renderedHeight := p.lineHeight(lines[idx], idx, width, observed, view)
 		if contentRow >= row && contentRow < row+renderedHeight {
 			return idx, true
 		}
@@ -313,12 +347,17 @@ func (p *LogPane) jumpMatch(direction int, lines []buffer.ViewLine) {
 		}
 	}
 	p.cursor = p.matchCursor
+	p.bindCursorLine(lines)
 	p.syncAutoScroll(lines)
 }
 
 func (p *LogPane) syncAutoScroll(lines []buffer.ViewLine) {
 	if len(lines) == 0 {
 		p.autoScroll = true
+		return
+	}
+	if p.selecting {
+		p.autoScroll = false
 		return
 	}
 	p.autoScroll = p.cursor >= len(lines)-1
@@ -337,7 +376,15 @@ func (p *LogPane) ensureCursorVisible(width, height int, lines []buffer.ViewLine
 		p.cursor = len(lines) - 1
 	}
 
-	if p.autoScroll && p.cursor >= len(lines)-1 {
+	if !p.autoScroll && p.frozenViewportEnd > 0 {
+		start, _ := p.visibleRange(width, height, lines, observed, view)
+		if p.cursor >= start && p.cursor < p.frozenViewportEnd {
+			return
+		}
+		p.frozenViewportEnd = 0
+	}
+
+	if p.autoScroll && !p.selecting && p.cursor >= len(lines)-1 {
 		p.viewportTop = p.tailViewportTop(width, height, lines, observed, view)
 		return
 	}
@@ -362,6 +409,26 @@ func (p *LogPane) ensureCursorVisible(width, height int, lines []buffer.ViewLine
 	p.viewportTop = p.cursor
 }
 
+// pinFrozenViewport records the visible window while tail-follow is paused.
+func (p *LogPane) pinFrozenViewport(width, height int, lines []buffer.ViewLine, observed []string, view config.LogViewConfig) {
+	if p.autoScroll {
+		p.frozenViewportEnd = 0
+		return
+	}
+	if p.frozenViewportEnd > 0 {
+		return
+	}
+	_, end := p.visibleRange(width, height, lines, observed, view)
+	p.frozenViewportEnd = end
+}
+
+// clearSelection ends log line selection and live-tail follow state.
+func (p *LogPane) clearSelection() {
+	p.selecting = false
+	p.anchorLineIndex = -1
+	p.frozenViewportEnd = 0
+}
+
 func (p *LogPane) tailViewportTop(width, height int, lines []buffer.ViewLine, observed []string, view config.LogViewConfig) int {
 	if len(lines) == 0 {
 		return 0
@@ -369,9 +436,9 @@ func (p *LogPane) tailViewportTop(width, height int, lines []buffer.ViewLine, ob
 
 	contentRows := max(1, height-3)
 	start := len(lines) - 1
-	usedRows := p.lineHeight(lines[start], width, observed, view)
+	usedRows := p.lineHeight(lines[start], start, width, observed, view)
 	for start > 0 {
-		nextRows := p.lineHeight(lines[start-1], width, observed, view)
+		nextRows := p.lineHeight(lines[start-1], start-1, width, observed, view)
 		if usedRows+nextRows > contentRows {
 			break
 		}
@@ -381,8 +448,8 @@ func (p *LogPane) tailViewportTop(width, height int, lines []buffer.ViewLine, ob
 	return start
 }
 
-func (p *LogPane) lineHeight(line buffer.ViewLine, width int, observed []string, view config.LogViewConfig) int {
-	return lipgloss.Height(p.renderStyledLine(line, width-4, p.selecting && line.Index == p.cursor, observed, view))
+func (p *LogPane) lineHeight(line buffer.ViewLine, lineIdx int, width int, observed []string, view config.LogViewConfig) int {
+	return lipgloss.Height(p.renderStyledLine(line, width-4, p.selecting && lineIdx == p.cursor, observed, view))
 }
 
 func logPaneStyle(width, height int) lipgloss.Style {

@@ -12,10 +12,8 @@ import (
 
 	"github.com/stackriot/iwatch/internal/buffer"
 	"github.com/stackriot/iwatch/internal/config"
-	"github.com/stackriot/iwatch/internal/detect"
 	"github.com/stackriot/iwatch/internal/runner"
 	"github.com/stackriot/iwatch/internal/stream"
-	"github.com/stackriot/iwatch/internal/watch"
 )
 
 const (
@@ -25,13 +23,6 @@ const (
 
 func (a *App) renderSidePanes(width, height int) string {
 	var parts []string
-	if a.commandPane.IsOpen() {
-		parts = append(parts, a.commandPane.View(width, height, a.focus == paneCommand))
-	}
-	if a.commandOutputPane.IsOpen() {
-		status, _ := a.streamStatus(a.commandOutputPane.StreamID())
-		parts = append(parts, a.commandOutputPane.View(width, height, a.focus == paneCommandOutput, status, a.streamLines[a.commandOutputPane.StreamID()]))
-	}
 	if a.eventsPane.IsOpen() {
 		parts = append(parts, a.eventsPane.View(width, height, a.focus == paneEvents))
 	}
@@ -51,7 +42,7 @@ func (a *App) logPaneContext() logPaneContext {
 		CommandTitle:  commandTitle,
 		PresetTitle:   preset.Title,
 		ProcessStatus: a.processStatus,
-		WatchStatus:   a.watchStatus,
+		AppStatus:     a.appStatus,
 		StatusDetail:  a.statusDetail,
 		BufferLen:     a.buf.Len(),
 		BufferCap:     a.cfg.BufferLines,
@@ -66,9 +57,6 @@ func (a *App) quitCmd() tea.Cmd {
 		return a.forceShutdownCmd()
 	}
 	if !a.hasRunningChildren() {
-		if a.cancelWatch != nil {
-			a.cancelWatch()
-		}
 		return tea.Quit
 	}
 	return a.beginShutdown(shutdownQuit)
@@ -141,19 +129,15 @@ func (a *App) inputBarHints() string {
 
 	// Main mode, focus-aware.
 	switch a.focus {
-	case paneCommand:
-		return "[j/k] move [enter] run [o] stream [c] close [tab] focus [?] help"
 	case paneStreams:
 		return "[j/k] move [enter] start/stop [o] modal [tab] focus [?] help"
-	case paneCommandOutput:
-		return "[j/k] scroll [p] close [tab] focus [?] help"
 	case paneEvents:
 		return "[tab] focus [?] help"
 	default:
 		if a.viteURL != "" {
-			return "[j/k] nav [/] query [l] streams [c] commands [y] share [O] open [?] help [q] quit"
+			return "[j/k] nav [/] query [l] streams [w] events [y] share [O] open [?] help [q] quit"
 		}
-		return "[j/k] nav [/] query [l] streams [c] commands [y] share [?] help [q] quit"
+		return "[j/k] nav [/] query [l] streams [w] events [y] share [?] help [q] quit"
 	}
 }
 
@@ -208,7 +192,7 @@ func (a *App) logPaneWidth() int {
 
 func (a *App) nextPane() paneID {
 	var panes []string
-	for _, pane := range []Pane{a.logPane, a.commandPane, a.commandOutputPane, a.eventsPane, a.streamsPane} {
+	for _, pane := range []Pane{a.logPane, a.eventsPane, a.streamsPane} {
 		if pane.IsOpen() {
 			panes = append(panes, string(pane.ID()))
 		}
@@ -230,14 +214,6 @@ func (a *App) togglePane(id paneID) {
 	switch id {
 	case paneLog:
 		return
-	case paneCommand:
-		a.commandPane.SetOpen(!a.commandPane.IsOpen())
-	case paneCommandOutput:
-		open := !a.commandOutputPane.IsOpen()
-		a.commandOutputPane.SetOpen(open)
-		if !open {
-			a.closeCommandOutputPane()
-		}
 	case paneEvents:
 		a.eventsPane.SetOpen(!a.eventsPane.IsOpen())
 	case paneStreams:
@@ -410,7 +386,12 @@ func (a *App) switchPreset(direction int) {
 }
 
 func (a *App) syncLogViewport(lines []buffer.ViewLine) {
-	a.logPane.ensureCursorVisible(max(10, a.logPaneWidth()), a.bodyHeight(), lines, a.buf.ObservedFields(), a.cfg.UI.LogView)
+	width := max(10, a.logPaneWidth())
+	height := a.bodyHeight()
+	observed := a.buf.ObservedFields()
+	view := a.cfg.UI.LogView
+	a.logPane.ensureCursorVisible(width, height, lines, observed, view)
+	a.logPane.pinFrozenViewport(width, height, lines, observed, view)
 }
 
 func (a *App) moveLogCursor(delta int) {
@@ -420,6 +401,7 @@ func (a *App) moveLogCursor(delta int) {
 	}
 	a.logPane.selecting = true
 	a.logPane.moveCursor(delta)
+	a.logPane.bindCursorLine(lines)
 	a.logPane.syncAutoScroll(lines)
 	a.syncLogViewport(lines)
 }
@@ -431,6 +413,7 @@ func (a *App) pageLogCursor(direction int) {
 	}
 	a.logPane.selecting = true
 	a.logPane.pageCursor(direction, a.logPageSize())
+	a.logPane.bindCursorLine(lines)
 	a.logPane.syncAutoScroll(lines)
 	a.syncLogViewport(lines)
 }
@@ -438,7 +421,7 @@ func (a *App) pageLogCursor(direction int) {
 func (a *App) moveLogToTail() {
 	a.resetLogWindow()
 	lines := a.snapshotLines()
-	a.logPane.selecting = false
+	a.logPane.clearSelection()
 	a.logPane.refreshQueryState(true, lines)
 	a.syncLogViewport(lines)
 }
@@ -467,7 +450,9 @@ func (a *App) flushPendingOutput() {
 	}
 	lines := a.snapshotLines()
 	a.logPane.refreshQueryState(a.logPane.autoScroll, lines)
-	a.syncLogViewport(lines)
+	if a.logPane.autoScroll {
+		a.syncLogViewport(lines)
+	}
 }
 
 func (a *App) resetLogWindow() {
@@ -482,8 +467,12 @@ func (a *App) expandLogWindow(current []buffer.ViewLine) []buffer.ViewLine {
 	oldLen := len(current)
 	a.logWindowLimit = min(a.buf.Len(), max(logShortMemoryLines, a.logWindowLimit+logShortMemoryLines))
 	expanded := a.snapshotLines()
-	a.logPane.cursor += max(0, len(expanded)-oldLen)
-	a.logPane.viewportTop += max(0, len(expanded)-oldLen)
+	if a.logPane.anchorLineIndex >= 0 {
+		a.logPane.resolveCursorLine(expanded)
+	} else {
+		a.logPane.cursor += max(0, len(expanded)-oldLen)
+		a.logPane.viewportTop += max(0, len(expanded)-oldLen)
+	}
 	return expanded
 }
 
@@ -610,9 +599,6 @@ func (a *App) startActiveCommandCmd() tea.Cmd {
 
 func (a *App) beginShutdown(action shutdownAction) tea.Cmd {
 	a.shutdownState = action
-	if a.cancelWatch != nil && action == shutdownQuit {
-		a.cancelWatch()
-	}
 	if a.streams != nil {
 		a.restartStreamIDs = a.streams.RunningIDs()
 	} else {
@@ -621,10 +607,10 @@ func (a *App) beginShutdown(action shutdownAction) tea.Cmd {
 	a.processStatus = "stopping gracefully"
 	switch action {
 	case shutdownQuit:
-		a.watchStatus = "quitting"
+		a.appStatus = "quitting"
 		a.buf.Append("system", "quitting: stopping child processes gracefully (press q again to force)")
 	case shutdownRebuild:
-		a.watchStatus = "rebuilding"
+		a.appStatus = "rebuilding"
 		a.buf.Append("system", "rebuild: stopping child processes gracefully (press r again to force)")
 	}
 	return func() tea.Msg {
@@ -674,7 +660,7 @@ func (a *App) handleShutdownDone(msg shutdownDoneMsg) (tea.Model, tea.Cmd) {
 		return a, tea.Quit
 	}
 
-	a.watchStatus = "clean"
+	a.appStatus = "clean"
 	for _, id := range restartStreamIDs {
 		if err := a.streams.Start(id); err != nil {
 			a.eventsPane.Append(fmt.Sprintf("stream %s restart failed: %v", id, err))
@@ -687,26 +673,6 @@ func waitRunnerEvent(run *runner.Runner) tea.Cmd {
 	return func() tea.Msg {
 		ev := <-run.Events()
 		return runnerMsg(ev)
-	}
-}
-
-func waitWatchEvent(w *watch.Watcher) tea.Cmd {
-	return func() tea.Msg {
-		ev, ok := <-w.Events()
-		if !ok {
-			return nil
-		}
-		return watchMsg(ev)
-	}
-}
-
-func waitWatchError(w *watch.Watcher) tea.Cmd {
-	return func() tea.Msg {
-		err, ok := <-w.Errors()
-		if !ok {
-			return nil
-		}
-		return watchErrMsg{err: err}
 	}
 }
 
@@ -832,76 +798,6 @@ func (a *App) allStreamConfigs() []config.StreamConfig {
 	return streams
 }
 
-func (a *App) startCommandAsStream(command detect.Command, streamID string, title string) {
-	if a.streams == nil {
-		a.eventsPane.Append("command streams unavailable")
-		return
-	}
-	if _, ok := a.runtimeStreams[streamID]; ok {
-		_ = a.streams.Stop(streamID)
-	}
-
-	cfg := config.StreamConfig{
-		ID:        streamID,
-		Title:     title,
-		Type:      "process",
-		Enabled:   boolPtr(true),
-		CWD:       command.CWD,
-		Cmd:       command.Cmd,
-		AutoStart: boolPtr(true),
-	}
-	a.runtimeStreams[streamID] = cfg
-	if !containsString(a.runtimeStreamOrder, streamID) {
-		a.runtimeStreamOrder = append(a.runtimeStreamOrder, streamID)
-	}
-	a.streamLines[streamID] = nil
-	a.applyActiveStreams()
-}
-
-func (a *App) startCommandInStream(command detect.Command) {
-	a.startCommandAsStream(command, "cmd-stream:"+command.ID, command.Title)
-	a.streamsPane.SetOpen(true)
-	a.focus = paneStreams
-}
-
-func (a *App) startCommandInOutputPane(command detect.Command) {
-	streamID := "cmd-panel:" + command.ID
-	if a.commandOutputID != "" && a.commandOutputID != streamID {
-		a.removeRuntimeStream(a.commandOutputID)
-	}
-	a.commandOutputID = streamID
-	a.commandOutputPane.SetCommand(streamID, command.Title)
-	a.commandOutputPane.SetOpen(true)
-	a.startCommandAsStream(command, streamID, command.Title)
-	a.focus = paneCommandOutput
-}
-
-func (a *App) closeCommandOutputPane() {
-	if a.commandOutputID == "" {
-		a.commandOutputPane.Clear()
-		return
-	}
-	a.removeRuntimeStream(a.commandOutputID)
-	a.commandOutputID = ""
-	a.commandOutputPane.Clear()
-	if a.focus == paneCommandOutput {
-		a.focus = paneLog
-	}
-}
-
-func (a *App) removeRuntimeStream(id string) {
-	if id == "" {
-		return
-	}
-	delete(a.runtimeStreams, id)
-	delete(a.streamLines, id)
-	a.runtimeStreamOrder = removeString(a.runtimeStreamOrder, id)
-	if a.streams != nil {
-		_ = a.streams.Stop(id)
-		a.applyActiveStreams()
-	}
-}
-
 func (a *App) openSelectedStreamDetail() {
 	status, ok := a.streamsPane.Selected(a.streamStatuses())
 	if !ok {
@@ -973,17 +869,6 @@ func containsString(values []string, target string) bool {
 		}
 	}
 	return false
-}
-
-func removeString(values []string, target string) []string {
-	out := values[:0]
-	for _, value := range values {
-		if value == target {
-			continue
-		}
-		out = append(out, value)
-	}
-	return out
 }
 
 func min(a, b int) int {
