@@ -1,6 +1,8 @@
 package buffer
 
 import (
+	"encoding/json"
+	"fmt"
 	"regexp"
 	"sort"
 	"strconv"
@@ -97,11 +99,16 @@ func (b *LogBuffer) StartSession(title string) {
 
 // Append stores a new log line in the ring buffer.
 func (b *LogBuffer) Append(source, text string) {
+	_ = b.AppendLine(source, text)
+}
+
+// AppendLine stores a new log line in the ring buffer and returns it.
+func (b *LogBuffer) AppendLine(source, text string) Line {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
 	clean := stripANSI(text)
-	fields, rawFields, fieldKeys := parseLogfmtFields(clean)
+	fields, rawFields, fieldKeys := parseStructuredFields(clean)
 	line := Line{
 		Index:     b.nextIdx,
 		Session:   b.session,
@@ -122,10 +129,11 @@ func (b *LogBuffer) Append(source, text string) {
 	if len(b.lines) == b.capacity {
 		b.lines[b.start] = line
 		b.start = (b.start + 1) % b.capacity
-		return
+		return line
 	}
 
 	b.lines = append(b.lines, line)
+	return line
 }
 
 // Truncate clears buffered log lines while keeping session and observed field metadata.
@@ -490,6 +498,9 @@ func (f parsedFieldFilters) matches(line Line) bool {
 
 func conditionMatches(term queryTerm, line Line) bool {
 	if term.key != "" {
+		if term.key == "source" {
+			return strings.Contains(strings.ToLower(line.Source), term.value)
+		}
 		value, ok := line.Fields[term.key]
 		return ok && strings.Contains(value, term.value)
 	}
@@ -566,6 +577,112 @@ func parseLogfmtFields(value string) (map[string]string, map[string]string, []st
 	}
 
 	return fields, rawFields, keys
+}
+
+func parseStructuredFields(value string) (map[string]string, map[string]string, []string) {
+	trimmed := strings.TrimSpace(value)
+	if strings.HasPrefix(trimmed, "{") && strings.HasSuffix(trimmed, "}") && json.Valid([]byte(trimmed)) {
+		fields, rawFields, keys, ok := parseJSONFields(trimmed)
+		if ok {
+			return fields, rawFields, keys
+		}
+	}
+	return parseLogfmtFields(value)
+}
+
+func parseJSONFields(value string) (map[string]string, map[string]string, []string, bool) {
+	var root any
+	if err := json.Unmarshal([]byte(value), &root); err != nil {
+		return nil, nil, nil, false
+	}
+	obj, ok := root.(map[string]any)
+	if !ok {
+		return nil, nil, nil, false
+	}
+
+	const (
+		maxKeys     = 200
+		maxDepth    = 6
+		maxValueLen = 4096
+	)
+
+	fields := make(map[string]string, 32)
+	rawFields := make(map[string]string, 32)
+	keys := make([]string, 0, 32)
+
+	var count int
+	var walk func(prefix string, v any, depth int)
+	walk = func(prefix string, v any, depth int) {
+		if count >= maxKeys || depth > maxDepth || v == nil {
+			return
+		}
+		switch vv := v.(type) {
+		case map[string]any:
+			for k, child := range vv {
+				if k == "" {
+					continue
+				}
+				key := k
+				if prefix != "" {
+					key = prefix + "." + k
+				}
+				walk(key, child, depth+1)
+				if count >= maxKeys {
+					return
+				}
+			}
+		case []any:
+			// Avoid exploding arrays; keep a short summary.
+			raw := fmt.Sprintf("%d items", len(vv))
+			if len(raw) > maxValueLen {
+				raw = raw[:maxValueLen]
+			}
+			fields[strings.ToLower(prefix)] = strings.ToLower(raw)
+			rawFields[prefix] = raw
+			keys = append(keys, strings.ToLower(prefix))
+			count++
+		case string:
+			raw := vv
+			if len(raw) > maxValueLen {
+				raw = raw[:maxValueLen]
+			}
+			fields[strings.ToLower(prefix)] = strings.ToLower(raw)
+			rawFields[prefix] = raw
+			keys = append(keys, strings.ToLower(prefix))
+			count++
+		case bool, float64:
+			raw := fmt.Sprintf("%v", vv)
+			fields[strings.ToLower(prefix)] = strings.ToLower(raw)
+			rawFields[prefix] = raw
+			keys = append(keys, strings.ToLower(prefix))
+			count++
+		default:
+			// Fallback: best-effort stringification.
+			raw := fmt.Sprintf("%v", vv)
+			if len(raw) > maxValueLen {
+				raw = raw[:maxValueLen]
+			}
+			fields[strings.ToLower(prefix)] = strings.ToLower(raw)
+			rawFields[prefix] = raw
+			keys = append(keys, strings.ToLower(prefix))
+			count++
+		}
+	}
+
+	for k, v := range obj {
+		if k == "" {
+			continue
+		}
+		walk(k, v, 1)
+		if count >= maxKeys {
+			break
+		}
+	}
+
+	if len(keys) == 0 {
+		return nil, nil, nil, false
+	}
+	return fields, rawFields, keys, true
 }
 
 func unquoteValue(value string) (string, bool) {

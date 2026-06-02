@@ -1,6 +1,8 @@
 package buffer
 
 import (
+	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/stackriot/iwatch/internal/config"
@@ -149,6 +151,77 @@ func TestLogfmtFieldFilters(t *testing.T) {
 	}
 	if got := lines[0].Fields["lua-manager.resource"]; got != "thread-example" {
 		t.Fatalf("unexpected resource field: %q", got)
+	}
+}
+
+func TestJSONLinesParseAndFilter(t *testing.T) {
+	buf, err := New(10, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	buf.Append("stdout", `{"level":"INFO","msg":"hello","http":{"port":8080}}`)
+	buf.Append("stdout", `{"level":"ERROR","msg":"bad","url":"http://127.0.0.1:5173"}`)
+
+	lines := buf.Snapshot(SnapshotOptions{Query: "level=error"})
+	if len(lines) != 1 {
+		t.Fatalf("len = %d", len(lines))
+	}
+	if got := lines[0].RawFields["url"]; got != "http://127.0.0.1:5173" {
+		t.Fatalf("url = %q", got)
+	}
+	if got := lines[0].RawFields["level"]; got != "ERROR" {
+		t.Fatalf("level = %q", got)
+	}
+
+	lines = buf.Snapshot(SnapshotOptions{Query: "http.port=8080"})
+	if len(lines) != 1 {
+		t.Fatalf("len = %d", len(lines))
+	}
+	if got := lines[0].RawFields["http.port"]; got != "8080" {
+		t.Fatalf("http.port = %q", got)
+	}
+}
+
+func TestSourceFilterMatchesSourceKey(t *testing.T) {
+	buf, err := New(10, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	buf.Append("vite:stdout", `msg="hi"`)
+	buf.Append("backend:stdout", `msg="hi"`)
+
+	lines := buf.Snapshot(SnapshotOptions{Query: "source=vite"})
+	if len(lines) != 1 {
+		t.Fatalf("len = %d", len(lines))
+	}
+	if got := lines[0].Source; got != "vite:stdout" {
+		t.Fatalf("source = %q", got)
+	}
+}
+
+func TestJSONLinesRespectsKeyLimit(t *testing.T) {
+	buf, err := New(10, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var b strings.Builder
+	b.WriteString("{")
+	for i := 0; i < 350; i++ {
+		if i > 0 {
+			b.WriteString(",")
+		}
+		b.WriteString(fmt.Sprintf("\"k%03d\":\"v\"", i))
+	}
+	b.WriteString("}")
+	buf.Append("stdout", b.String())
+
+	lines := buf.Snapshot(SnapshotOptions{})
+	if len(lines) != 1 {
+		t.Fatalf("len = %d", len(lines))
+	}
+	if got := len(lines[0].RawFields); got > 200 {
+		t.Fatalf("raw fields = %d, want <= 200", got)
 	}
 }
 

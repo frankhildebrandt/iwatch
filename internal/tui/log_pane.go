@@ -26,6 +26,8 @@ type logPaneContext struct {
 	BufferLen     int
 	BufferCap     int
 	StreamCount   int
+	BackendURL    string
+	ViteURL       string
 }
 
 // LogPane owns log rendering, query input, selection, and cursor state.
@@ -90,38 +92,18 @@ func (p *LogPane) View(width, height int, focused bool, lines []buffer.ViewLine,
 	return logPaneStyle(width, height).Render(content)
 }
 
-// InputBar renders the current help and query bar below the panes.
-func (p *LogPane) InputBar() string {
-	label := "log"
-	keys := "[j/k, arrows, pgup/pgdown, ctrl+u/d, home/end/G] nav [t] truncate [v] fields [F] field filter [r] rebuild [l] streams [p] cmd output [/] query [g] config [S] split [[]/[]] preset [tab] focus [n/N] hit [?] help [q|esc x3] quit"
-	if p.queryInput.Focused() {
-		label = "query"
-		keys = "[esc] close [enter] close"
-	} else if p.selecting {
-		label = "select"
-		keys = "[j/k, arrows, pgup/pgdown, home/end/G] choose [esc] tail [?] help [q] quit"
-	}
-
-	value := p.queryInput.View()
-	if !p.queryInput.Focused() && p.query == "" {
-		value = p.queryInput.Placeholder
-	}
-	if !p.autoScroll && label == "log" {
-		label = "log paused"
-	}
-	bar := fmt.Sprintf("%s> %s | %s", label, value, keys)
-
-	return lipgloss.NewStyle().
-		Padding(0, 1).
-		Background(lipgloss.Color("236")).
-		Foreground(lipgloss.Color("255")).
-		Render(bar)
-}
+// InputBar is rendered by App to stay mode-/focus-aware.
 
 func (p *LogPane) renderHeader(ctx logPaneContext) string {
 	info := fmt.Sprintf("cmd: %s | preset: %s | run: %s | watch: %s | streams: %d | buffer: %d/%d", ctx.CommandTitle, ctx.PresetTitle, ctx.ProcessStatus, ctx.WatchStatus, ctx.StreamCount, ctx.BufferLen, ctx.BufferCap)
 	if ctx.StatusDetail != "" {
 		info += " | " + ctx.StatusDetail
+	}
+	if ctx.BackendURL != "" {
+		info += " | backend: " + ctx.BackendURL
+	}
+	if ctx.ViteURL != "" {
+		info += " | vite: " + ctx.ViteURL
 	}
 	return lipgloss.NewStyle().Foreground(lipgloss.Color("245")).Render(info)
 }

@@ -151,7 +151,7 @@ func (e *ConfigEditor) rows() []editorRow {
 	for idx, stream := range draft.Streams {
 		rows = append(rows, editorRow{section: "Streams", kind: editorStream, label: fmt.Sprintf("Stream %d", idx+1), value: formatStream(stream), index: idx})
 	}
-	rows = append(rows, editorRow{section: "Streams", kind: editorStreamAdd, label: "Add stream", value: "id|title|type|source|cmd|cwd|enabled|autoStart"})
+	rows = append(rows, editorRow{section: "Streams", kind: editorStreamAdd, label: "Add stream", value: "id|title|type|role|source|cmd|cwd|enabled|autoStart"})
 
 	rows = append(rows,
 		editorRow{section: "Log fields", kind: editorFields, label: "Visible fields", value: strings.Join(draft.UI.LogView.VisibleFields, ", ")},

@@ -88,6 +88,31 @@ func TestHelpQuestionMarkCloses(t *testing.T) {
 	}
 }
 
+func TestShareOpensFromLogAndCloses(t *testing.T) {
+	buf, err := buffer.New(100, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	buf.Append("stdout", `level=INFO msg="hello"`)
+	app := New(config.Default(), "", []detect.Command{{ID: "cmd", Title: "Cmd", Cmd: "echo hi"}}, "cmd", buf, runner.New(), nil)
+	app.height = 20
+
+	model, _ := app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	app = model.(*App)
+	if app.mode != modeShare {
+		t.Fatalf("expected share mode, got %s", app.mode)
+	}
+	if app.share.contents == "" {
+		t.Fatal("expected share contents to be set")
+	}
+
+	model, _ = app.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	app = model.(*App)
+	if app.mode != modeMain {
+		t.Fatalf("expected main mode, got %s", app.mode)
+	}
+}
+
 func TestLogInputBarKeepsSecondaryKeysOut(t *testing.T) {
 	buf, err := buffer.New(100, nil)
 	if err != nil {
@@ -95,8 +120,8 @@ func TestLogInputBarKeepsSecondaryKeysOut(t *testing.T) {
 	}
 	app := New(config.Default(), "", []detect.Command{{ID: "cmd", Title: "Cmd", Cmd: "echo hi"}}, "cmd", buf, runner.New(), nil)
 
-	bar := app.logPane.InputBar()
-	for _, key := range []string{"[s]", "[w]", "[c]", "[enter]"} {
+	bar := app.inputBar()
+	for _, key := range []string{"[s]", "[w]", "[enter]"} {
 		if strings.Contains(bar, key) {
 			t.Fatalf("expected input bar not to contain %s: %q", key, bar)
 		}

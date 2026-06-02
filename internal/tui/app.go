@@ -31,6 +31,7 @@ const (
 	modeConfig      appMode = "config"
 	modeDetail      appMode = "detail"
 	modeStream      appMode = "stream"
+	modeShare       appMode = "share"
 	modeHelp        appMode = "help"
 	modeFields      appMode = "fields"
 	modeFieldFilter appMode = "field-filter"
@@ -76,6 +77,8 @@ type App struct {
 	editor            *ConfigEditor
 	detail            *DetailView
 	help              *HelpView
+	share             *ShareView
+	automations       *AutomationEngine
 
 	processStatus    string
 	watchStatus      string
@@ -88,6 +91,9 @@ type App struct {
 	lastEnter        time.Time
 	lastClick        time.Time
 	lastClickLine    int
+
+	backendURL string
+	viteURL    string
 }
 
 type tickMsg time.Time
@@ -97,6 +103,12 @@ type streamMsg stream.Event
 type watchMsg watch.Event
 type watchErrMsg struct{ err error }
 type shutdownDoneMsg struct{ action shutdownAction }
+type shareResultMsg struct {
+	copied   bool
+	path     string
+	err      error
+	contents string
+}
 
 // New creates the TUI model without starting the Bubble Tea program.
 func New(cfg config.Config, configPath string, commands []detect.Command, defaultCommand string, buf *buffer.LogBuffer, run *runner.Runner, watcher *watch.Watcher) *App {
@@ -145,6 +157,8 @@ func NewWithStreams(cfg config.Config, configPath string, commands []detect.Comm
 	app.editor = NewConfigEditor(configPath)
 	app.detail = NewDetailView()
 	app.help = NewHelpView()
+	app.share = NewShareView()
+	app.automations = NewAutomationEngine(cfg.UI.Automations)
 
 	return app
 }
@@ -183,6 +197,8 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a.handleDetailKey(msg)
 		case modeStream:
 			return a.handleStreamDetailKey(msg)
+		case modeShare:
+			return a.handleShareKey(msg)
 		case modeHelp:
 			return a.handleHelpKey(msg)
 		case modeFields:
@@ -192,6 +208,9 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		default:
 			return a.handleMainKey(msg)
 		}
+	case shareResultMsg:
+		a.share.ApplyResult(msg)
+		return a, nil
 	case tickMsg:
 		if time.Since(a.lastEsc) > 2*time.Second {
 			a.escCount = 0
@@ -239,6 +258,8 @@ func (a *App) View() string {
 		return a.detail.View(a.width, a.height)
 	case modeStream:
 		return a.renderStreamDetail()
+	case modeShare:
+		return a.share.View(a.width, a.height)
 	case modeHelp:
 		return a.help.View(a.width, a.height)
 	case modeFields:
@@ -284,7 +305,7 @@ func (a *App) View() string {
 		body = lipgloss.JoinHorizontal(lipgloss.Top, a.logPane.View(mainWidth, bodyHeight, a.focus == paneLog, lines, observed, a.cfg.UI.LogView, a.logPaneContext()), side)
 	}
 
-	return lipgloss.JoinVertical(lipgloss.Left, body, a.logPane.InputBar())
+	return lipgloss.JoinVertical(lipgloss.Left, body, a.inputBar())
 }
 
 // Run starts the Bubble Tea program for the configured app model.

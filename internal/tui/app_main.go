@@ -200,6 +200,18 @@ func (a *App) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			a.focus = paneLog
 		}
 	case "/", "f":
+		if a.focus == paneStreams {
+			status, ok := a.streamsPane.Selected(a.streamStatuses())
+			if ok && status.ID != "" {
+				a.focus = paneLog
+				a.logPane.queryInput.SetValue("source=" + status.ID)
+				a.logPane.queryInput.CursorEnd()
+				a.logPane.queryInput.Focus()
+				a.resetLogWindow()
+				a.logPane.refreshQueryState(false, a.snapshotLines())
+				return a, nil
+			}
+		}
 		a.focus = paneLog
 		a.logPane.queryInput.Focus()
 	case "w":
@@ -247,6 +259,21 @@ func (a *App) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if a.focus == paneStreams {
 			a.openSelectedStreamDetail()
 		}
+	case "y":
+		if a.focus == paneStreams {
+			status, ok := a.streamsPane.Selected(a.streamStatuses())
+			if ok && status.ID != "" {
+				lines := a.streamLines[status.ID]
+				start := max(0, len(lines)-50)
+				snippet := "iwatch share v1\nstream: " + status.ID + "\n\n" + strings.Join(lines[start:], "\n")
+				a.openShare(snippet)
+				return a, nil
+			}
+		}
+		if a.focus == paneLog {
+			a.openShareForCurrentLine(0)
+			return a, nil
+		}
 	case "n":
 		lines := a.snapshotLines()
 		a.logPane.jumpMatch(1, lines)
@@ -262,6 +289,16 @@ func (a *App) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "g":
 		a.editor.Open(a.cfg)
 		a.mode = modeConfig
+	case "Y":
+		if a.focus == paneLog {
+			a.openShareForCurrentLine(20)
+			return a, nil
+		}
+	case "O":
+		if a.viteURL != "" {
+			_ = openURLCmd(a.viteURL)
+			a.eventsPane.Append("open: " + a.viteURL)
+		}
 	}
 	return a, nil
 }
@@ -442,6 +479,12 @@ func (a *App) handleDetailKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "q":
 		return a, a.quitCmd()
+	case "y":
+		a.openShareForDetail(false)
+		return a, nil
+	case "Y":
+		a.openShareForDetail(true)
+		return a, nil
 	case "esc", "enter":
 		a.mode = modeMain
 	case "up", "k":
@@ -454,6 +497,32 @@ func (a *App) handleDetailKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		a.detail.scroll += max(1, a.logPageSize()/2)
 	case "home", "g":
 		a.detail.scroll = 0
+	}
+	return a, nil
+}
+
+func (a *App) handleShareKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "q":
+		return a, a.quitCmd()
+	case "esc", "enter":
+		a.share.Close()
+		a.mode = modeMain
+		return a, nil
+	case "y":
+		return a, shareCopyCmd(a.share.contents)
+	case "s":
+		return a, shareExportCmd(a.configPath, a.share.contents)
+	case "up", "k":
+		a.share.scroll = max(0, a.share.scroll-1)
+	case "down", "j":
+		a.share.scroll++
+	case "pgup", "ctrl+u":
+		a.share.scroll = max(0, a.share.scroll-max(1, a.logPageSize()/2))
+	case "pgdown", "ctrl+d":
+		a.share.scroll += max(1, a.logPageSize()/2)
+	case "home", "g":
+		a.share.scroll = 0
 	}
 	return a, nil
 }
@@ -512,7 +581,11 @@ func (a *App) handleStream(ev stream.Event) (tea.Model, tea.Cmd) {
 		a.eventsPane.Append(fmt.Sprintf("stream %s started pid=%d", ev.StreamID, ev.PID))
 	case stream.EventOutput:
 		a.streamLines[ev.StreamID] = appendTrimmed(a.streamLines[ev.StreamID], ev.Text, 1000)
-		a.buf.Append(ev.Source, ev.Text)
+		line := a.buf.AppendLine(ev.Source, ev.Text)
+		if a.automations != nil {
+			a.automations.Apply(a, line)
+		}
+		a.observeDevFlow(line)
 		if a.logPane.autoScroll {
 			a.resetLogWindow()
 		}

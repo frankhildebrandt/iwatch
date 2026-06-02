@@ -61,6 +61,9 @@ iwatch --config ./.iwatch.config.json
 - `S`: Split-Richtung wechseln
 - `esc` oder `enter` in der Detailansicht: zurueck zur Logansicht
 - `esc`: Bottom-Query schliessen
+- `y`: Share/Copy der aktuellen Zeile (Agent-friendly Snippet)
+- `Y`: Share/Copy der aktuellen Zeile inkl. Kontext (+/- 20 Zeilen)
+- `O`: erkannte Vite-URL im Browser oeffnen (wenn verfuegbar)
 - `q`: App beenden
 - `esc` dreimal: App beenden
 
@@ -74,6 +77,14 @@ iwatch --config ./.iwatch.config.json
 Die Bottom-Query wirkt zusaetzlich auf das aktive Preset. Strukturierte OR-Filter werden in der Config-Datei ueber Presets gepflegt.
 
 Der Live-Feldfilter unter `F` wirkt nur fuer die laufende Sitzung. Mehrere gesetzte Feldfilter werden mit `AND` kombiniert und matchen case-insensitive per Contains gegen erkannte logfmt-Felder.
+
+## Structured Logging (logfmt + JSON Lines)
+
+`iwatch` erkennt strukturierte Felder sowohl aus logfmt-aehnlichen `key=value` Tokens als auch aus **JSON Lines** (eine JSON pro Zeile).\n\nBeispiele:\n\n- logfmt:\n  - `level=INFO msg=\"hello\" request_id=abc`\n- JSON Lines:\n  - `{\"level\":\"INFO\",\"msg\":\"hello\",\"http\":{\"port\":8080}}`\n\nNested JSON wird als `dot.path` flach gemacht (z.B. `http.port=8080`) und ist dann im Filter nutzbar.
+
+## Dev-Flow: Go Backend + Vite (Port Handshake)
+
+Wenn du Go-Backend und Vite getrennt startest, kann `iwatch` den Backend-Port/URL aus den Logs erkennen und diese Info an den Vite-Devserver als ENV weitergeben.\n\nEmpfohlen:\n\n- Backend loggt structured `url=...` oder `port=...` (logfmt oder JSON Lines)\n- Vite wird als Stream mit `role: \"vite\"` konfiguriert, Backend als `role: \"backend\"`\n\nMinimal-Beispiel fuer `streams`:\n\n```json\n{\n  \"streams\": [\n    {\n      \"id\": \"backend\",\n      \"title\": \"Go backend\",\n      \"type\": \"process\",\n      \"role\": \"backend\",\n      \"cmd\": \"go run ./cmd/server\",\n      \"autoStart\": true\n    },\n    {\n      \"id\": \"vite\",\n      \"title\": \"Vite dev\",\n      \"type\": \"process\",\n      \"role\": \"vite\",\n      \"cmd\": \"npm run dev\",\n      \"autoStart\": false\n    }\n  ]\n}\n```\n\nSobald `iwatch` eine Backend-URL erkennt, setzt es beim Vite-Stream:\n\n- `BACKEND_URL`\n- `BACKEND_PORT` (wenn ableitbar)\n\nund startet den Vite-Stream (on-demand) automatisch.\n\nWenn `iwatch` die Vite-URL erkennt, kannst du sie mit `O` direkt oeffnen.
 
 ## Config Editor
 
