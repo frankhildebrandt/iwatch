@@ -1,8 +1,6 @@
 package tui
 
 import (
-	"context"
-	"fmt"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -13,7 +11,6 @@ import (
 	"github.com/stackriot/iwatch/internal/detect"
 	"github.com/stackriot/iwatch/internal/runner"
 	"github.com/stackriot/iwatch/internal/stream"
-	"github.com/stackriot/iwatch/internal/watch"
 )
 
 type paneID string
@@ -21,11 +18,9 @@ type appMode string
 type shutdownAction string
 
 const (
-	paneLog           paneID = "log"
-	paneCommand       paneID = "commands"
-	paneCommandOutput paneID = "command-output"
-	paneEvents        paneID = "events"
-	paneStreams       paneID = "streams"
+	paneLog     paneID = "log"
+	paneEvents  paneID = "events"
+	paneStreams paneID = "streams"
 
 	modeMain        appMode = "main"
 	modeConfig      appMode = "config"
@@ -40,7 +35,7 @@ const (
 	shutdownRebuild shutdownAction = "rebuild"
 )
 
-// App coordinates the TUI, pane focus, and background runner/watch events.
+// App coordinates the TUI, pane focus, and background runner events.
 type App struct {
 	cfg                  config.Config
 	configPath           string
@@ -50,42 +45,35 @@ type App struct {
 	buf                  *buffer.LogBuffer
 	runner               *runner.Runner
 	streams              *stream.Supervisor
-	watcher              *watch.Watcher
-	cancelWatch          context.CancelFunc
 	fieldFilters         map[string]string
 	streamLines          map[string][]string
 	streamDetailID       string
 	runtimeStreams       map[string]config.StreamConfig
 	runtimeStreamOrder   []string
-	commandOutputID      string
 	pendingOutput        []runner.Event
 	outputFlushScheduled bool
-	logWindowLimit       int
 
 	width  int
 	height int
 	focus  paneID
 	mode   appMode
 
-	logPane           *LogPane
-	commandPane       *CommandPane
-	commandOutputPane *CommandOutputPane
-	eventsPane        *EventsPane
-	streamsPane       *StreamsPane
-	fieldMenu         *fieldMenu
-	filterMenu        *fieldFilterMenu
-	editor            *ConfigEditor
-	detail            *DetailView
-	help              *HelpView
-	share             *ShareView
-	automations       *AutomationEngine
+	logPane     *LogPane
+	eventsPane  *EventsPane
+	streamsPane *StreamsPane
+	fieldMenu   *fieldMenu
+	filterMenu  *fieldFilterMenu
+	editor      *ConfigEditor
+	detail      *DetailView
+	help        *HelpView
+	share       *ShareView
+	automations *AutomationEngine
 
 	processStatus    string
-	watchStatus      string
+	appStatus        string
 	statusDetail     string
 	shutdownState    shutdownAction
 	restartStreamIDs []string
-	stale            bool
 	escCount         int
 	lastEsc          time.Time
 	lastEnter        time.Time
@@ -100,8 +88,6 @@ type tickMsg time.Time
 type outputFlushMsg time.Time
 type runnerMsg runner.Event
 type streamMsg stream.Event
-type watchMsg watch.Event
-type watchErrMsg struct{ err error }
 type shutdownDoneMsg struct{ action shutdownAction }
 type shareResultMsg struct {
 	copied   bool
@@ -111,19 +97,19 @@ type shareResultMsg struct {
 }
 
 // New creates the TUI model without starting the Bubble Tea program.
-func New(cfg config.Config, configPath string, commands []detect.Command, defaultCommand string, buf *buffer.LogBuffer, run *runner.Runner, watcher *watch.Watcher) *App {
-	return NewWithStreams(cfg, configPath, commands, defaultCommand, buf, run, nil, watcher)
+func New(cfg config.Config, configPath string, commands []detect.Command, defaultCommand string, buf *buffer.LogBuffer, run *runner.Runner) *App {
+	return NewWithStreams(cfg, configPath, commands, defaultCommand, buf, run, nil)
 }
 
 // NewWithStreams creates the TUI model with an optional stream supervisor.
-func NewWithStreams(cfg config.Config, configPath string, commands []detect.Command, defaultCommand string, buf *buffer.LogBuffer, run *runner.Runner, streams *stream.Supervisor, watcher *watch.Watcher) *App {
+func NewWithStreams(cfg config.Config, configPath string, commands []detect.Command, defaultCommand string, buf *buffer.LogBuffer, run *runner.Runner, streams *stream.Supervisor) *App {
 	commandByID := make(map[string]detect.Command, len(commands))
 	for _, cmd := range commands {
 		commandByID[cmd.ID] = cmd
 	}
 
 	focus := paneID(cfg.UI.FocusPane)
-	if focus != paneCommand && focus != paneCommandOutput && focus != paneEvents && focus != paneStreams {
+	if focus != paneEvents && focus != paneStreams {
 		focus = paneLog
 	}
 
@@ -136,20 +122,16 @@ func NewWithStreams(cfg config.Config, configPath string, commands []detect.Comm
 		buf:            buf,
 		runner:         run,
 		streams:        streams,
-		watcher:        watcher,
 		fieldFilters:   make(map[string]string),
 		streamLines:    make(map[string][]string),
 		runtimeStreams: make(map[string]config.StreamConfig),
-		logWindowLimit: logShortMemoryLines,
-		focus:          focus,
+		focus: focus,
 		mode:           modeMain,
 		processStatus:  "idle",
-		watchStatus:    "clean",
+		appStatus:      "clean",
 	}
 
 	app.logPane = NewLogPane(cfg, buf)
-	app.commandPane = NewCommandPane(commands, cfg.UI.OpenPanes)
-	app.commandOutputPane = NewCommandOutputPane(cfg.UI.OpenPanes)
 	app.eventsPane = NewEventsPane(cfg.UI.OpenPanes)
 	app.streamsPane = NewStreamsPane(cfg.UI.OpenPanes)
 	app.fieldMenu = newFieldMenu()
@@ -163,16 +145,10 @@ func NewWithStreams(cfg config.Config, configPath string, commands []detect.Comm
 	return app
 }
 
-// Init starts the background tick, runner, and optional watcher integration.
+// Init starts the background tick, runner, and stream integration.
 func (a *App) Init() tea.Cmd {
 	cmds := []tea.Cmd{tickCmd(), a.startInitialRun()}
 	a.applyActiveStreams()
-	if a.watcher != nil {
-		ctx, cancel := context.WithCancel(context.Background())
-		a.cancelWatch = cancel
-		go a.watcher.Run(ctx, 250*time.Millisecond)
-		cmds = append(cmds, waitWatchEvent(a.watcher), waitWatchError(a.watcher))
-	}
 	cmds = append(cmds, waitRunnerEvent(a.runner))
 	if a.streams != nil {
 		cmds = append(cmds, waitStreamEvent(a.streams))
@@ -224,23 +200,8 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a.handleRunner(runner.Event(msg))
 	case streamMsg:
 		return a.handleStream(stream.Event(msg))
-	case watchMsg:
-		a.stale = true
-		a.watchStatus = "rebuild possible"
-		a.statusDetail = msg.Path
-		a.eventsPane.Append(fmt.Sprintf("%s %s", msg.Op.String(), msg.Path))
-		return a, waitWatchEvent(a.watcher)
-	case watchErrMsg:
-		a.eventsPane.Append("watch error: " + msg.err.Error())
-		return a, waitWatchError(a.watcher)
 	case shutdownDoneMsg:
 		return a.handleShutdownDone(msg)
-	}
-
-	if a.commandPane.IsOpen() {
-		var cmd tea.Cmd
-		cmd = a.commandPane.Update(msg)
-		return a, cmd
 	}
 	return a, nil
 }
@@ -309,8 +270,8 @@ func (a *App) View() string {
 }
 
 // Run starts the Bubble Tea program for the configured app model.
-func Run(cfg config.Config, configPath string, commands []detect.Command, defaultCommand string, buf *buffer.LogBuffer, run *runner.Runner, streams *stream.Supervisor, watcher *watch.Watcher) error {
-	app := NewWithStreams(cfg, configPath, commands, defaultCommand, buf, run, streams, watcher)
+func Run(cfg config.Config, configPath string, commands []detect.Command, defaultCommand string, buf *buffer.LogBuffer, run *runner.Runner, streams *stream.Supervisor) error {
+	app := NewWithStreams(cfg, configPath, commands, defaultCommand, buf, run, streams)
 	p := tea.NewProgram(app, tea.WithAltScreen(), tea.WithMouseCellMotion())
 	_, err := p.Run()
 	return err

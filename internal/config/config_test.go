@@ -18,18 +18,18 @@ func TestResolveConfigPrecedence(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	mustWrite(t, filepath.Join(home, ".iwatch", "config.json"), `{"watchPath":"home","bufferLines":10,"ui":{"focusPane":"events"}}`)
-	mustWrite(t, filepath.Join(base, ".iwatch", "config.json"), `{"watchPath":"project","bufferLines":20}`)
-	mustWrite(t, filepath.Join(base, ".iwatch.config.json"), `{"watchPath":"root","bufferLines":30}`)
+	mustWrite(t, filepath.Join(home, ".iwatch", "config.json"), `{"bufferLines":10,"ui":{"focusPane":"events"}}`)
+	mustWrite(t, filepath.Join(base, ".iwatch", "config.json"), `{"bufferLines":20}`)
+	mustWrite(t, filepath.Join(base, ".iwatch.config.json"), `{"bufferLines":30}`)
 
-	cfg, path, err := ResolveConfig(base, CLIOverrides{WatchPath: "flag", BufferLines: 44, CommandID: "make:run"})
+	cfg, path, err := ResolveConfig(base, CLIOverrides{BufferLines: 44, CommandID: "make:run"})
 	if err != nil {
 		t.Fatalf("ResolveConfig() error = %v", err)
 	}
 	if path != filepath.Join(base, ".iwatch.config.json") {
 		t.Fatalf("used path = %s", path)
 	}
-	if cfg.WatchPath != "flag" || cfg.BufferLines != 44 || cfg.DefaultCommand != "make:run" {
+	if cfg.BufferLines != 44 || cfg.DefaultCommand != "make:run" {
 		t.Fatalf("unexpected cfg: %+v", cfg)
 	}
 	if cfg.UI.FocusPane != "events" {
@@ -40,7 +40,7 @@ func TestResolveConfigPrecedence(t *testing.T) {
 func TestResolveConfigExplicitPath(t *testing.T) {
 	base := t.TempDir()
 	explicit := filepath.Join(base, "custom.json")
-	mustWrite(t, explicit, `{"watchPath":"explicit","bufferLines":64}`)
+	mustWrite(t, explicit, `{"bufferLines":64}`)
 
 	cfg, path, err := ResolveConfig(base, CLIOverrides{ConfigPath: explicit})
 	if err != nil {
@@ -49,7 +49,7 @@ func TestResolveConfigExplicitPath(t *testing.T) {
 	if path != explicit {
 		t.Fatalf("path = %s", path)
 	}
-	if cfg.WatchPath != "explicit" || cfg.BufferLines != 64 {
+	if cfg.BufferLines != 64 {
 		t.Fatalf("unexpected cfg: %+v", cfg)
 	}
 }

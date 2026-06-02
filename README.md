@@ -1,13 +1,12 @@
 # iwatch
 
-`iwatch` ist ein interaktives Watch-Tool fuer Build- und Entwicklungs-Workflows. Es kombiniert automatische Command-Erkennung, Dateisystem-Watching und eine TUI zum Lesen, Filtern und Durchsuchen von Prozess-Output.
+`iwatch` ist eine interaktive Dev-Log-TUI fuer Build- und Entwicklungs-Workflows. Sie kombiniert automatische Command-Erkennung, einen Hauptprozess-Runner und eine Oberflaeche zum Lesen, Filtern und Durchsuchen von Prozess-Output.
 
 ## Features
 
 - Auto-Mode mit Erkennung von `package.json`-Scripts und `Makefile`-Targets
-- Rekursives Watching des aktuellen Pfads oder eines expliziten `--path`
-- Manueller Rebuild-Flow mit sichtbarem `rebuild possible`-Status
-- TUI mit Log-View, Command-Palette, Bottom-Query und Watch-Events
+- Manueller Rebuild des aktiven Commands per `r`
+- TUI mit Log-View, Bottom-Query und Events-Pane fuer Systemmeldungen
 - Zusaetzliche LogStreams fuer Dateien und Hintergrundprozesse, pro Preset aktivierbar
 - Scrollen per Cursor, Live-Filter, logfmt-verstaendige Feldabfragen und Highlight-Regeln
 - Selektierbare Logzeilen mit Detailansicht fuer geparste Felder und pretty printed JSON-Werte
@@ -26,7 +25,6 @@ go build ./cmd/iwatch
 
 ```bash
 iwatch
-iwatch --path ./src
 iwatch --command npm:dev
 iwatch --buffer-lines 200000
 iwatch --config ./.iwatch.config.json
@@ -35,13 +33,11 @@ iwatch --config ./.iwatch.config.json
 ## Keybindings
 
 - `r`: aktives Command stoppen und neu starten
-- `c`: Command-Palette oeffnen oder schliessen
-- `p`: Command-Output-Pane oeffnen oder schliessen
 - `?`: Keymap-Hilfe oeffnen oder schliessen
 - `l`: Streams-Pane oeffnen oder schliessen
 - `/`: Bottom-Query oeffnen
 - `f`: Bottom-Query oeffnen
-- `w`: Watch-Events-Pane oeffnen
+- `w`: Events-Pane oeffnen (Streams, Automations, Config)
 - `v`: Logfeld-Menue oeffnen, per Tippen filtern und erkannte logfmt-Felder ein-/ausblenden
 - `F`: Live-Feldfilter oeffnen, Felder waehlen und per Contains-Wert filtern
 - `g`: Fullscreen-Config-Editor oeffnen
@@ -51,8 +47,6 @@ iwatch --config ./.iwatch.config.json
 - `pgup/pgdown`, `ctrl+u/ctrl+d`: seitenweise scrollen
 - `home/end`, `G`: an Anfang oder Ende springen
 - `enter`: ans Log-Ende springen oder in der Auswahl die Detailansicht oeffnen
-- `enter` im Commands-Pane: ausgewaehltes Command im Command-Output-Pane starten
-- `o` im Commands-Pane: ausgewaehltes Command als separaten Stream starten
 - `enter` im Streams-Pane: ausgewaehlten on-demand Stream starten oder laufenden Stream stoppen
 - `o` im Streams-Pane: Ausgabe eines einzelnen Streams modal anzeigen
 - `t`: Logbuffer leeren und wieder ans Log-Ende springen
@@ -113,7 +107,6 @@ Beispiel:
 
 ```json
 {
-  "watchPath": "./",
   "bufferLines": 1000000,
   "defaultCommand": "npm:dev",
   "commands": [

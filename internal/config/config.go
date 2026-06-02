@@ -20,7 +20,6 @@ const (
 
 // Config contains the persisted app configuration.
 type Config struct {
-	WatchPath      string          `json:"watchPath"`
 	BufferLines    int             `json:"bufferLines"`
 	DefaultCommand string          `json:"defaultCommand"`
 	Commands       []CommandConfig `json:"commands"`
@@ -106,7 +105,6 @@ type UIConfig struct {
 // CLIOverrides contains command-line configuration overrides.
 type CLIOverrides struct {
 	ConfigPath  string
-	WatchPath   string
 	BufferLines int
 	CommandID   string
 }
@@ -166,9 +164,6 @@ func ResolveConfig(baseDir string, overrides CLIOverrides) (Config, string, erro
 		usedPath = path
 	}
 
-	if overrides.WatchPath != "" {
-		cfg.WatchPath = overrides.WatchPath
-	}
 	if overrides.BufferLines > 0 {
 		cfg.BufferLines = overrides.BufferLines
 	}
@@ -312,9 +307,6 @@ func loadFile(path string) (Config, bool, error) {
 
 func merge(base, override Config) Config {
 	out := base
-	if override.WatchPath != "" {
-		out.WatchPath = override.WatchPath
-	}
 	if override.BufferLines > 0 {
 		out.BufferLines = override.BufferLines
 	}

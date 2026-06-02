@@ -47,15 +47,11 @@ func keymapSections() []keymapSection {
 		{
 			Title: "Panes und Ansichten",
 			Rows: []keymapRow{
-				{Keys: "c", Description: "Command-Palette oeffnen/schliessen"},
-				{Keys: "p", Description: "Command-Output-Pane oeffnen/schliessen"},
-				{Keys: "w", Description: "Watch-Events-Pane oeffnen/schliessen"},
+				{Keys: "w", Description: "Events-Pane oeffnen/schliessen"},
 				{Keys: "l", Description: "Streams-Pane oeffnen/schliessen"},
 				{Keys: "v", Description: "Logfelder ein-/ausblenden"},
 				{Keys: "F", Description: "Live-Feldfilter oeffnen"},
 				{Keys: "g", Description: "Config-Editor oeffnen"},
-				{Keys: "enter in Commands", Description: "Command in Output-Pane starten"},
-				{Keys: "o in Commands", Description: "Command als Stream starten"},
 				{Keys: "o in Streams", Description: "Stream-Details oeffnen"},
 			},
 		},
