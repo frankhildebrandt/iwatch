@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/fsnotify/fsnotify"
@@ -126,6 +127,9 @@ func (w *Watcher) addRecursive(root string) error {
 		if !d.IsDir() {
 			return nil
 		}
+		if w.isDotGitOrUnder(path) {
+			return filepath.SkipDir
+		}
 		if path != w.root && w.ignores.matches(path, true) {
 			return filepath.SkipDir
 		}
@@ -147,11 +151,26 @@ func (w *Watcher) reloadIgnores() error {
 }
 
 func (w *Watcher) shouldIgnoreEventPath(path string) bool {
+	if w.isDotGitOrUnder(path) {
+		return true
+	}
 	info, err := os.Stat(path)
 	if err == nil {
 		return w.ignores.matches(path, info.IsDir())
 	}
 	return w.ignores.matches(path, false)
+}
+
+func (w *Watcher) isDotGitOrUnder(path string) bool {
+	relative, err := filepath.Rel(w.root, path)
+	if err != nil {
+		return false
+	}
+	relative = filepath.ToSlash(relative)
+	if relative == ".git" || strings.HasPrefix(relative, ".git/") {
+		return true
+	}
+	return strings.Contains(relative, "/.git/")
 }
 
 func samePath(left string, right string) bool {

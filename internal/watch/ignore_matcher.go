@@ -1,56 +1,32 @@
 package watch
 
 import (
-	"bufio"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
-	"strings"
+
+	"github.com/git-pkgs/gitignore"
 )
 
 type ignoreMatcher struct {
-	root     string
-	patterns []ignorePattern
+	root    string
+	matcher *gitignore.Matcher
 }
 
 func newIgnoreMatcher(root string) (*ignoreMatcher, error) {
-	patterns := make([]ignorePattern, 0)
-	for _, name := range []string{".gitignore", ".iwatchignore"} {
-		filePatterns, err := loadIgnorePatterns(filepath.Join(root, name))
-		if err != nil {
-			return nil, err
-		}
-		patterns = append(patterns, filePatterns...)
-	}
-	return &ignoreMatcher{
-		root:     root,
-		patterns: patterns,
-	}, nil
-}
+	m := gitignore.New("")
 
-func loadIgnorePatterns(path string) ([]ignorePattern, error) {
-	file, err := os.Open(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("open %s: %w", path, err)
+	if err := loadGitignoreTree(m, root); err != nil {
+		return nil, err
 	}
-	defer file.Close()
 
-	patterns := make([]ignorePattern, 0)
-	scanner := bufio.NewScanner(file)
-	for scanner.Scan() {
-		pattern := parseIgnorePattern(scanner.Text())
-		if pattern.raw == "" {
-			continue
-		}
-		patterns = append(patterns, pattern)
+	// `.iwatchignore` has higher priority than `.gitignore`.
+	if err := addIgnoreFileIfExists(m, filepath.Join(root, ".iwatchignore"), ""); err != nil {
+		return nil, err
 	}
-	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("scan %s: %w", path, err)
-	}
-	return patterns, nil
+
+	return &ignoreMatcher{root: root, matcher: m}, nil
 }
 
 func (m *ignoreMatcher) matches(path string, isDir bool) bool {
@@ -67,40 +43,53 @@ func (m *ignoreMatcher) matches(path string, isDir bool) bool {
 		return false
 	}
 
-	ignored := false
-	for _, pattern := range m.patterns {
-		if !pattern.matches(relative, isDir) {
-			continue
-		}
-		ignored = !pattern.negated
-	}
-	return ignored
+	return m.matcher.MatchPath(relative, isDir)
 }
 
-func parseIgnorePattern(line string) ignorePattern {
-	trimmed := strings.TrimSpace(line)
-	if trimmed == "" || strings.HasPrefix(trimmed, "#") {
-		return ignorePattern{}
+func loadGitignoreTree(m *gitignore.Matcher, root string) error {
+	return filepath.WalkDir(root, func(currentPath string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+
+		if d.IsDir() && d.Name() == ".git" {
+			return filepath.SkipDir
+		}
+
+		if d.IsDir() {
+			return nil
+		}
+
+		if d.Name() != ".gitignore" {
+			return nil
+		}
+
+		dir := filepath.Dir(currentPath)
+		scope, err := filepath.Rel(root, dir)
+		if err != nil {
+			return fmt.Errorf("compute .gitignore scope for %s: %w", currentPath, err)
+		}
+		if scope == "." {
+			scope = ""
+		}
+		scope = filepath.ToSlash(scope)
+
+		if err := addIgnoreFileIfExists(m, currentPath, scope); err != nil {
+			return err
+		}
+		return nil
+	})
+}
+
+func addIgnoreFileIfExists(m *gitignore.Matcher, filePath string, scope string) error {
+	_, err := os.ReadFile(filePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("read %s: %w", filePath, err)
 	}
 
-	negated := strings.HasPrefix(trimmed, "!")
-	if negated {
-		trimmed = strings.TrimPrefix(trimmed, "!")
-	}
-
-	directoryOnly := strings.HasSuffix(trimmed, "/")
-	trimmed = strings.TrimSuffix(trimmed, "/")
-	anchored := strings.HasPrefix(trimmed, "/")
-	trimmed = strings.TrimPrefix(trimmed, "/")
-	if trimmed == "" {
-		return ignorePattern{}
-	}
-
-	return ignorePattern{
-		raw:           trimmed,
-		negated:       negated,
-		directoryOnly: directoryOnly,
-		anchored:      anchored,
-		basenameOnly:  !strings.Contains(trimmed, "/"),
-	}
+	m.AddFromFile(filePath, scope)
+	return nil
 }

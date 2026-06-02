@@ -94,6 +94,26 @@ func TestWatcherIgnoresGitIgnoreMatches(t *testing.T) {
 	mustNotReceiveEvent(t, watcher, 250*time.Millisecond)
 }
 
+func TestWatcherIgnoresNestedGitIgnoreMatches(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "sub", ".gitignore"), "ignored.txt\n")
+
+	watcher, err := New(root)
+	if err != nil {
+		t.Fatalf("new watcher: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go watcher.Run(ctx, 10*time.Millisecond)
+
+	writeFile(t, filepath.Join(root, "sub", "ignored.txt"), "hello")
+	mustNotReceiveEvent(t, watcher, 250*time.Millisecond)
+
+	writeFile(t, filepath.Join(root, "sub", "tracked.txt"), "hello")
+	mustReceiveEventForPath(t, watcher, filepath.Join(root, "sub", "tracked.txt"))
+}
+
 func TestWatcherIgnoresIWatchIgnoreMatches(t *testing.T) {
 	root := t.TempDir()
 	writeFile(t, filepath.Join(root, ".iwatchignore"), "*.tmp\n")
@@ -112,6 +132,43 @@ func TestWatcherIgnoresIWatchIgnoreMatches(t *testing.T) {
 
 	writeFile(t, filepath.Join(root, "build.log"), "hello")
 	mustReceiveEventForPath(t, watcher, filepath.Join(root, "build.log"))
+}
+
+func TestWatcherIWatchIgnoreOverridesGitIgnore(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, ".gitignore"), "*.log\n")
+	writeFile(t, filepath.Join(root, ".iwatchignore"), "!keep.log\n")
+
+	watcher, err := New(root)
+	if err != nil {
+		t.Fatalf("new watcher: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go watcher.Run(ctx, 10*time.Millisecond)
+
+	writeFile(t, filepath.Join(root, "drop.log"), "hello")
+	mustNotReceiveEvent(t, watcher, 250*time.Millisecond)
+
+	writeFile(t, filepath.Join(root, "keep.log"), "hello")
+	mustReceiveEventForPath(t, watcher, filepath.Join(root, "keep.log"))
+}
+
+func TestWatcherIgnoresDotGit(t *testing.T) {
+	root := t.TempDir()
+
+	watcher, err := New(root)
+	if err != nil {
+		t.Fatalf("new watcher: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go watcher.Run(ctx, 10*time.Millisecond)
+
+	writeFile(t, filepath.Join(root, ".git", "objects", "aa", "bb"), "hello")
+	mustNotReceiveEvent(t, watcher, 250*time.Millisecond)
 }
 
 func TestWatcherReloadsIgnoreFiles(t *testing.T) {
