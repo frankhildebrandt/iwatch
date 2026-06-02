@@ -28,8 +28,16 @@ jobs:
           make build-linux-x64
           make build-linux-arm
 
-      - name: Upload dist artifact
-        uses: actions/upload-artifact@v3
-        with:
-          name: dist
-          path: dist/
+      - name: Upload dist (Forgejo generic package)
+        env:
+          FORGEJO_SERVER_URL: ${{ forgejo.server_url }}
+          FORGEJO_REPOSITORY_OWNER: ${{ forgejo.repository_owner }}
+          FORGEJO_ACTOR: ${{ forgejo.actor }}
+          FORGEJO_TOKEN: ${{ secrets.FORGEJO_TOKEN }}
+          FORGEJO_SHA: ${{ forgejo.sha }}
+        run: |
+          tar -czf dist.tar.gz -C dist .
+          curl --fail --show-error --location \
+            --user "${FORGEJO_ACTOR}:${FORGEJO_TOKEN}" \
+            --upload-file dist.tar.gz \
+            "${FORGEJO_SERVER_URL}/api/packages/${FORGEJO_REPOSITORY_OWNER}/generic/iwatch/${FORGEJO_SHA}/dist.tar.gz"
