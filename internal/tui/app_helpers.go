@@ -16,10 +16,7 @@ import (
 	"github.com/stackriot/iwatch/internal/stream"
 )
 
-const (
-	logShortMemoryLines = 1000
-	gracefulStopTimeout = 30 * time.Second
-)
+const gracefulStopTimeout = 30 * time.Second
 
 func (a *App) renderSidePanes(width, height int) string {
 	var parts []string
@@ -156,7 +153,7 @@ func (a *App) openShare(contents string) {
 }
 
 func (a *App) openShareForCurrentLine(contextLines int) {
-	lines := a.snapshotLinesWithLimit(a.logWindowLimit)
+	lines := a.snapshotLines()
 	line, ok := a.logPane.currentLine(lines)
 	if !ok {
 		return
@@ -222,13 +219,6 @@ func (a *App) togglePane(id paneID) {
 }
 
 func (a *App) snapshotLines() []buffer.ViewLine {
-	if a.logWindowLimit <= 0 {
-		a.logWindowLimit = logShortMemoryLines
-	}
-	return a.snapshotLinesWithLimit(a.logWindowLimit)
-}
-
-func (a *App) snapshotLinesWithLimit(limit int) []buffer.ViewLine {
 	preset := activePreset(a.cfg)
 	highlights := preset.HighlightRules
 	if len(highlights) == 0 {
@@ -239,7 +229,6 @@ func (a *App) snapshotLinesWithLimit(limit int) []buffer.ViewLine {
 		Query:        a.logPane.query,
 		FieldFilters: cloneFieldFilters(a.fieldFilters),
 		Highlights:   highlights,
-		Limit:        limit,
 	})
 }
 
@@ -379,7 +368,6 @@ func (a *App) switchPreset(direction int) {
 	next := (current + direction + len(ids)) % len(ids)
 	a.cfg.UI.ActivePreset = ids[next]
 	a.applyActiveStreams()
-	a.resetLogWindow()
 	lines := a.snapshotLines()
 	a.logPane.refreshQueryState(true, lines)
 	a.syncLogViewport(lines)
@@ -396,9 +384,6 @@ func (a *App) syncLogViewport(lines []buffer.ViewLine) {
 
 func (a *App) moveLogCursor(delta int) {
 	lines := a.snapshotLines()
-	if delta < 0 && a.logPane.cursor <= 0 {
-		lines = a.expandLogWindow(lines)
-	}
 	a.logPane.selecting = true
 	a.logPane.moveCursor(delta)
 	a.logPane.bindCursorLine(lines)
@@ -408,9 +393,6 @@ func (a *App) moveLogCursor(delta int) {
 
 func (a *App) pageLogCursor(direction int) {
 	lines := a.snapshotLines()
-	if direction < 0 && a.logPane.cursor < max(1, a.logPageSize()/2) {
-		lines = a.expandLogWindow(lines)
-	}
 	a.logPane.selecting = true
 	a.logPane.pageCursor(direction, a.logPageSize())
 	a.logPane.bindCursorLine(lines)
@@ -419,7 +401,6 @@ func (a *App) pageLogCursor(direction int) {
 }
 
 func (a *App) moveLogToTail() {
-	a.resetLogWindow()
 	lines := a.snapshotLines()
 	a.logPane.clearSelection()
 	a.logPane.refreshQueryState(true, lines)
@@ -427,7 +408,6 @@ func (a *App) moveLogToTail() {
 }
 
 func (a *App) truncateLogs() {
-	a.resetLogWindow()
 	a.buf.Truncate()
 	a.buf.Append("system", "logs truncated")
 	a.moveLogToTail()
@@ -445,35 +425,18 @@ func (a *App) flushPendingOutput() {
 		a.observeDevFlow(line)
 	}
 	a.pendingOutput = a.pendingOutput[:0]
-	if a.logPane.autoScroll {
-		a.resetLogWindow()
-	}
+	a.applyLogSnapshot()
+}
+
+func (a *App) applyLogSnapshot() {
 	lines := a.snapshotLines()
 	a.logPane.refreshQueryState(a.logPane.autoScroll, lines)
 	if a.logPane.autoScroll {
 		a.syncLogViewport(lines)
+		return
 	}
-}
-
-func (a *App) resetLogWindow() {
-	a.logWindowLimit = logShortMemoryLines
-}
-
-func (a *App) expandLogWindow(current []buffer.ViewLine) []buffer.ViewLine {
-	if a.logWindowLimit >= a.buf.Len() {
-		return current
-	}
-
-	oldLen := len(current)
-	a.logWindowLimit = min(a.buf.Len(), max(logShortMemoryLines, a.logWindowLimit+logShortMemoryLines))
-	expanded := a.snapshotLines()
-	if a.logPane.anchorLineIndex >= 0 {
-		a.logPane.resolveCursorLine(expanded)
-	} else {
-		a.logPane.cursor += max(0, len(expanded)-oldLen)
-		a.logPane.viewportTop += max(0, len(expanded)-oldLen)
-	}
-	return expanded
+	a.logPane.maintainPausedViewport(lines)
+	a.syncLogViewport(lines)
 }
 
 func (a *App) switchDraftPreset(direction int) {

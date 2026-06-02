@@ -38,9 +38,10 @@ type LogPane struct {
 	matchCursor int
 	cursor             int
 	viewportTop        int
-	anchorLineIndex    int
-	frozenViewportEnd  int
-	selecting          bool
+	anchorLineIndex       int
+	frozenViewportEnd     int
+	viewportAnchorOffset  int
+	selecting             bool
 	// autoScroll follows the snapshot tail so new ring-buffer lines stay visible.
 	autoScroll bool
 }
@@ -80,17 +81,12 @@ func (p *LogPane) View(width, height int, focused bool, lines []buffer.ViewLine,
 		return logPaneStyle(width, height).Render(header + "\nNo output yet.")
 	}
 
-	if p.cursor >= len(lines) {
-		p.cursor = len(lines) - 1
-	}
-	if p.cursor < 0 {
-		p.cursor = 0
-	}
+	cursor := p.displayCursor(lines)
 	start, end := p.visibleRange(width, height, lines, observed, view)
 
 	rendered := make([]string, 0, end-start)
 	for idx := start; idx < end; idx++ {
-		rendered = append(rendered, p.renderStyledLine(lines[idx], width-4, p.selecting && idx == p.cursor, observed, view))
+		rendered = append(rendered, p.renderStyledLine(lines[idx], width-4, p.selecting && idx == cursor, observed, view))
 	}
 	content := header + "\n" + strings.Join(rendered, "\n")
 	return logPaneStyle(width, height).Render(content)
@@ -221,6 +217,28 @@ func (p *LogPane) bindCursorLine(lines []buffer.ViewLine) {
 		return
 	}
 	p.anchorLineIndex = lines[p.cursor].Index
+}
+
+// displayCursor returns the snapshot index used for rendering without mutating state.
+func (p *LogPane) displayCursor(lines []buffer.ViewLine) int {
+	if len(lines) == 0 {
+		return 0
+	}
+	cursor := p.cursor
+	if p.anchorLineIndex >= 0 {
+		for idx, line := range lines {
+			if line.Index == p.anchorLineIndex {
+				return idx
+			}
+		}
+	}
+	if cursor >= len(lines) {
+		cursor = len(lines) - 1
+	}
+	if cursor < 0 {
+		cursor = 0
+	}
+	return cursor
 }
 
 // resolveCursorLine maps the anchored ring-buffer line back into the current snapshot.
@@ -376,14 +394,6 @@ func (p *LogPane) ensureCursorVisible(width, height int, lines []buffer.ViewLine
 		p.cursor = len(lines) - 1
 	}
 
-	if !p.autoScroll && p.frozenViewportEnd > 0 {
-		start, _ := p.visibleRange(width, height, lines, observed, view)
-		if p.cursor >= start && p.cursor < p.frozenViewportEnd {
-			return
-		}
-		p.frozenViewportEnd = 0
-	}
-
 	if p.autoScroll && !p.selecting && p.cursor >= len(lines)-1 {
 		p.viewportTop = p.tailViewportTop(width, height, lines, observed, view)
 		return
@@ -413,13 +423,29 @@ func (p *LogPane) ensureCursorVisible(width, height int, lines []buffer.ViewLine
 func (p *LogPane) pinFrozenViewport(width, height int, lines []buffer.ViewLine, observed []string, view config.LogViewConfig) {
 	if p.autoScroll {
 		p.frozenViewportEnd = 0
+		p.viewportAnchorOffset = 0
 		return
 	}
 	if p.frozenViewportEnd > 0 {
 		return
 	}
+	if p.anchorLineIndex < 0 {
+		p.bindCursorLine(lines)
+	}
 	_, end := p.visibleRange(width, height, lines, observed, view)
 	p.frozenViewportEnd = end
+	p.viewportAnchorOffset = p.cursor - p.viewportTop
+}
+
+// maintainPausedViewport realigns the viewport after the ring-buffer snapshot shifts.
+func (p *LogPane) maintainPausedViewport(lines []buffer.ViewLine) {
+	if p.autoScroll {
+		return
+	}
+	p.resolveCursorLine(lines)
+	if p.anchorLineIndex >= 0 && p.viewportAnchorOffset >= 0 {
+		p.viewportTop = max(0, p.cursor-p.viewportAnchorOffset)
+	}
 }
 
 // clearSelection ends log line selection and live-tail follow state.
@@ -427,6 +453,7 @@ func (p *LogPane) clearSelection() {
 	p.selecting = false
 	p.anchorLineIndex = -1
 	p.frozenViewportEnd = 0
+	p.viewportAnchorOffset = 0
 }
 
 func (p *LogPane) tailViewportTop(width, height int, lines []buffer.ViewLine, observed []string, view config.LogViewConfig) int {

@@ -987,6 +987,48 @@ func TestAutoScrollFollowsRingBufferTail(t *testing.T) {
 	}
 }
 
+func TestPausedViewportTracksAnchoredLineAfterSnapshotShift(t *testing.T) {
+	buf, err := buffer.New(5, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for idx := 0; idx < 8; idx++ {
+		buf.Append("stdout", fmt.Sprintf("line-%d", idx))
+	}
+
+	app := New(config.Default(), "", []detect.Command{{ID: "cmd", Title: "Cmd", Cmd: "echo hi"}}, "cmd", buf, runner.New())
+	app.width = 80
+	app.height = 8
+	lines := app.snapshotLines()
+	var want buffer.ViewLine
+	for idx, line := range lines {
+		if line.Text == "line-7" {
+			want = line
+			app.logPane.cursor = idx
+			break
+		}
+	}
+	if want.Text == "" {
+		t.Fatal("expected line-7 in snapshot")
+	}
+	app.logPane.selecting = true
+	app.logPane.bindCursorLine(lines)
+	app.logPane.syncAutoScroll(lines)
+	app.syncLogViewport(lines)
+
+	_, _ = app.handleRunner(runner.Event{Type: runner.EventOutput, Source: "stdout", Text: "line-8"})
+	app.flushPendingOutput()
+
+	lines = app.snapshotLines()
+	line, ok := app.logPane.currentLine(lines)
+	if !ok || line.Text != want.Text {
+		t.Fatalf("expected anchored line %q, got %+v", want.Text, line)
+	}
+	if app.logPane.autoScroll {
+		t.Fatal("expected paused tail-follow in selection mode")
+	}
+}
+
 func TestSelectionAnchorsRingBufferLine(t *testing.T) {
 	buf, err := buffer.New(5, nil)
 	if err != nil {
@@ -1032,7 +1074,7 @@ func TestSelectionAnchorsRingBufferLine(t *testing.T) {
 	}
 }
 
-func TestScrollingPastShortMemoryExpandsLogWindow(t *testing.T) {
+func TestSnapshotIncludesFullRingBuffer(t *testing.T) {
 	buf, err := buffer.New(2000, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -1045,25 +1087,24 @@ func TestScrollingPastShortMemoryExpandsLogWindow(t *testing.T) {
 	app.height = 20
 
 	lines := app.snapshotLines()
-	if len(lines) != logShortMemoryLines {
-		t.Fatalf("initial window len = %d, want %d", len(lines), logShortMemoryLines)
+	if len(lines) != 1505 {
+		t.Fatalf("snapshot len = %d, want 1505", len(lines))
 	}
-	if lines[0].Text != "line-0505" {
-		t.Fatalf("initial window first line = %q", lines[0].Text)
+	if lines[0].Text != "line-0000" {
+		t.Fatalf("snapshot first line = %q", lines[0].Text)
+	}
+	if lines[len(lines)-1].Text != "line-1504" {
+		t.Fatalf("snapshot last line = %q", lines[len(lines)-1].Text)
 	}
 
 	app.logPane.cursor = 0
 	model, _ := app.Update(tea.KeyMsg{Type: tea.KeyUp})
 	app = model.(*App)
-	lines = app.snapshotLines()
-	if len(lines) != 1505 {
-		t.Fatalf("expanded window len = %d, want 1505", len(lines))
-	}
-	if lines[0].Text != "line-0000" {
-		t.Fatalf("expanded window first line = %q", lines[0].Text)
-	}
 	if !app.logPane.selecting {
-		t.Fatal("expected expanding scroll to keep selection mode")
+		t.Fatal("expected scrolling up to enter selection mode")
+	}
+	if got := app.snapshotLines()[app.logPane.cursor].Text; got != "line-0000" {
+		t.Fatalf("cursor line = %q", got)
 	}
 }
 

@@ -14,8 +14,6 @@ import (
 	"github.com/stackriot/iwatch/internal/config"
 )
 
-const shortMemoryLines = 1000
-
 // Line stores one buffered log line and its parsed metadata.
 type Line struct {
 	Index     int
@@ -41,7 +39,6 @@ type SnapshotOptions struct {
 	Query        string
 	FieldFilters map[string]string
 	Highlights   []config.HighlightRule
-	Limit        int
 }
 
 // LogBuffer keeps a bounded in-memory history of log lines.
@@ -49,7 +46,6 @@ type LogBuffer struct {
 	mu         sync.RWMutex
 	capacity   int
 	lines      []Line
-	shortLines []Line
 	start      int
 	version    uint64
 	nextIdx    int
@@ -82,9 +78,8 @@ func New(capacity int, rules []config.HighlightRule) (*LogBuffer, error) {
 
 	return &LogBuffer{
 		capacity:   capacity,
-		lines:      make([]Line, 0, min(capacity, 1024)),
-		shortLines: make([]Line, 0, min(capacity, shortMemoryLines)),
-		fieldSet:   make(map[string]struct{}),
+		lines:    make([]Line, 0, min(capacity, 1024)),
+		fieldSet: make(map[string]struct{}),
 		baseRules:  append([]config.HighlightRule(nil), rules...),
 	}, nil
 }
@@ -124,7 +119,6 @@ func (b *LogBuffer) AppendLine(source, text string) Line {
 	b.cacheKey = ""
 	b.cacheLines = nil
 	b.recordObservedFields(fieldKeys)
-	b.appendShort(line)
 
 	if len(b.lines) == b.capacity {
 		b.lines[b.start] = line
@@ -143,8 +137,6 @@ func (b *LogBuffer) Truncate() {
 
 	clear(b.lines)
 	b.lines = b.lines[:0]
-	clear(b.shortLines)
-	b.shortLines = b.shortLines[:0]
 	b.start = 0
 	b.version++
 	b.cacheKey = ""
@@ -178,12 +170,7 @@ func (b *LogBuffer) Snapshot(opts SnapshotOptions) []ViewLine {
 		return cloneViewLines(b.cacheLines)
 	}
 
-	var out []ViewLine
-	if opts.Limit > 0 {
-		out = b.limitedSnapshot(opts, presetQuery, runtimeQuery, fieldFilters, compiled)
-	} else {
-		out = b.fullSnapshot(presetQuery, runtimeQuery, fieldFilters, compiled)
-	}
+	out := b.fullSnapshot(presetQuery, runtimeQuery, fieldFilters, compiled)
 
 	b.cacheKey = key
 	b.cacheVer = b.version
@@ -219,44 +206,6 @@ func (b *LogBuffer) fullSnapshot(presetQuery parsedPreset, runtimeQuery parsedQu
 	return out
 }
 
-func (b *LogBuffer) limitedSnapshot(opts SnapshotOptions, presetQuery parsedPreset, runtimeQuery parsedQuery, fieldFilters parsedFieldFilters, compiled []compiledRule) []ViewLine {
-	out := make([]ViewLine, 0, min(len(b.lines), opts.Limit))
-	for idx := len(b.shortLines) - 1; idx >= 0 && len(out) < opts.Limit; idx-- {
-		line := b.shortLines[idx]
-		if !presetQuery.matches(line) || !runtimeQuery.matches(line) || !fieldFilters.matches(line) {
-			continue
-		}
-		view := ViewLine{Line: line}
-		view.HighlightRule = matchRule(compiled, line.Text)
-		out = append(out, view)
-	}
-
-	for idx := len(b.lines) - len(b.shortLines) - 1; idx >= 0 && len(out) < opts.Limit; idx-- {
-		line := b.lineAt(idx)
-		if !presetQuery.matches(line) || !runtimeQuery.matches(line) || !fieldFilters.matches(line) {
-			continue
-		}
-		view := ViewLine{Line: line}
-		view.HighlightRule = matchRule(compiled, line.Text)
-		out = append(out, view)
-	}
-
-	for left, right := 0, len(out)-1; left < right; left, right = left+1, right-1 {
-		out[left], out[right] = out[right], out[left]
-	}
-	return out
-}
-
-func (b *LogBuffer) appendShort(line Line) {
-	limit := min(b.capacity, shortMemoryLines)
-	if len(b.shortLines) == limit {
-		copy(b.shortLines, b.shortLines[1:])
-		b.shortLines[len(b.shortLines)-1] = line
-		return
-	}
-	b.shortLines = append(b.shortLines, line)
-}
-
 func (b *LogBuffer) recordObservedFields(fields []string) {
 	for _, key := range fields {
 		if _, ok := b.fieldSet[key]; ok {
@@ -273,7 +222,6 @@ func snapshotCacheKey(opts SnapshotOptions, rules []config.HighlightRule) string
 		presetKey(opts.Preset),
 		fieldFiltersKey(opts.FieldFilters),
 		rulesKey(rules),
-		strconv.Itoa(opts.Limit),
 	}, "\x00")
 }
 

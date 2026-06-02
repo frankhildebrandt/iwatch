@@ -68,7 +68,7 @@ func TestTruncateClearsLinesAndKeepsObservedFields(t *testing.T) {
 	}
 }
 
-func TestSnapshotLimitReturnsLastMatchingLines(t *testing.T) {
+func TestSnapshotFilterReturnsAllMatchingLines(t *testing.T) {
 	buf, err := New(10, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -82,12 +82,15 @@ func TestSnapshotLimitReturnsLastMatchingLines(t *testing.T) {
 		buf.Append("stdout", line)
 	}
 
-	lines := buf.Snapshot(SnapshotOptions{Query: "level=error", Limit: 1})
-	if len(lines) != 1 {
+	lines := buf.Snapshot(SnapshotOptions{Query: "level=error"})
+	if len(lines) != 2 {
 		t.Fatalf("len = %d", len(lines))
 	}
-	if got := lines[0].RawFields["msg"]; got != "four" {
-		t.Fatalf("msg = %q, want four", got)
+	if got := lines[0].RawFields["msg"]; got != "two" {
+		t.Fatalf("first msg = %q, want two", got)
+	}
+	if got := lines[1].RawFields["msg"]; got != "four" {
+		t.Fatalf("last msg = %q, want four", got)
 	}
 }
 

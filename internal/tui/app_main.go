@@ -103,7 +103,6 @@ func (a *App) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 		var cmd tea.Cmd
 		a.logPane.queryInput, cmd = a.logPane.queryInput.Update(msg)
-		a.resetLogWindow()
 		a.logPane.refreshQueryState(false, a.snapshotLines())
 		return a, cmd
 	}
@@ -148,7 +147,6 @@ func (a *App) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "pgdown", "ctrl+d":
 		a.pageLogCursor(1)
 	case "home":
-		a.logWindowLimit = a.buf.Len()
 		lines := a.snapshotLines()
 		a.logPane.cursor = 0
 		a.logPane.syncAutoScroll(lines)
@@ -169,7 +167,6 @@ func (a *App) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				a.logPane.queryInput.SetValue("source=" + status.ID)
 				a.logPane.queryInput.CursorEnd()
 				a.logPane.queryInput.Focus()
-				a.resetLogWindow()
 				a.logPane.refreshQueryState(false, a.snapshotLines())
 				return a, nil
 			}
@@ -320,7 +317,6 @@ func (a *App) handleFieldFilterKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				a.appendFieldFilterValue(a.filterMenu.editingField, string(msg.Runes))
 			}
 		}
-		a.resetLogWindow()
 		a.logPane.refreshQueryState(a.logPane.autoScroll, a.snapshotLines())
 		return a, nil
 	}
@@ -492,19 +488,11 @@ func (a *App) handleRunner(ev runner.Event) (tea.Model, tea.Cmd) {
 			a.processStatus = "completed"
 			a.buf.Append("system", "process completed successfully")
 		}
-		lines := a.snapshotLines()
-		a.logPane.refreshQueryState(a.logPane.autoScroll, lines)
-		if a.logPane.autoScroll {
-			a.syncLogViewport(lines)
-		}
+		a.applyLogSnapshot()
 	case runner.EventError:
 		a.flushPendingOutput()
 		a.buf.Append("system", "runner error: "+ev.Err.Error())
-		lines := a.snapshotLines()
-		a.logPane.refreshQueryState(a.logPane.autoScroll, lines)
-		if a.logPane.autoScroll {
-			a.syncLogViewport(lines)
-		}
+		a.applyLogSnapshot()
 	}
 	return a, waitRunnerEvent(a.runner)
 }
@@ -520,14 +508,7 @@ func (a *App) handleStream(ev stream.Event) (tea.Model, tea.Cmd) {
 			a.automations.Apply(a, line)
 		}
 		a.observeDevFlow(line)
-		if a.logPane.autoScroll {
-			a.resetLogWindow()
-		}
-		lines := a.snapshotLines()
-		a.logPane.refreshQueryState(a.logPane.autoScroll, lines)
-		if a.logPane.autoScroll {
-			a.syncLogViewport(lines)
-		}
+		a.applyLogSnapshot()
 	case stream.EventExited:
 		if ev.Err != nil {
 			a.eventsPane.Append(fmt.Sprintf("stream %s exited with code %d", ev.StreamID, ev.Code))
