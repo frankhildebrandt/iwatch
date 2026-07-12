@@ -408,6 +408,15 @@ func (s *Supervisor) runProcess(ctx context.Context, cfg config.StreamConfig, ru
 	cmd := exec.Command("sh", "-lc", cfg.Cmd)
 	cmd.Dir = s.resolvePath(cfg.CWD)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if len(cfg.Env) > 0 {
+		cmd.Env = append([]string(nil), os.Environ()...)
+		for k, v := range cfg.Env {
+			if k == "" {
+				continue
+			}
+			cmd.Env = append(cmd.Env, k+"="+v)
+		}
+	}
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {

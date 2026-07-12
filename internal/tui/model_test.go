@@ -22,13 +22,13 @@ func TestToggleAndFocusPanes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	app := New(config.Default(), "", []detect.Command{{ID: "cmd", Title: "Cmd", Cmd: "echo hi"}}, "cmd", buf, runner.New(), nil)
-	app.togglePane(paneCommand)
-	if !app.commandPane.IsOpen() {
-		t.Fatal("expected command pane to be open")
+	app := New(config.Default(), "", []detect.Command{{ID: "cmd", Title: "Cmd", Cmd: "echo hi"}}, "cmd", buf, runner.New())
+	app.togglePane(paneEvents)
+	if !app.eventsPane.IsOpen() {
+		t.Fatal("expected events pane to be open")
 	}
 	next := app.nextPane()
-	if next != paneLog && next != paneCommand {
+	if next != paneLog && next != paneEvents {
 		t.Fatalf("unexpected next pane: %s", next)
 	}
 }
@@ -38,7 +38,7 @@ func TestQueryInputOpensAndCloses(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	app := New(config.Default(), "", []detect.Command{{ID: "cmd", Title: "Cmd", Cmd: "echo hi"}}, "cmd", buf, runner.New(), nil)
+	app := New(config.Default(), "", []detect.Command{{ID: "cmd", Title: "Cmd", Cmd: "echo hi"}}, "cmd", buf, runner.New())
 
 	model, _ := app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
 	app = model.(*App)
@@ -58,7 +58,7 @@ func TestHelpOpensAndCloses(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	app := New(config.Default(), "", []detect.Command{{ID: "cmd", Title: "Cmd", Cmd: "echo hi"}}, "cmd", buf, runner.New(), nil)
+	app := New(config.Default(), "", []detect.Command{{ID: "cmd", Title: "Cmd", Cmd: "echo hi"}}, "cmd", buf, runner.New())
 
 	model, _ := app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'?'}})
 	app = model.(*App)
@@ -78,10 +78,35 @@ func TestHelpQuestionMarkCloses(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	app := New(config.Default(), "", []detect.Command{{ID: "cmd", Title: "Cmd", Cmd: "echo hi"}}, "cmd", buf, runner.New(), nil)
+	app := New(config.Default(), "", []detect.Command{{ID: "cmd", Title: "Cmd", Cmd: "echo hi"}}, "cmd", buf, runner.New())
 	app.mode = modeHelp
 
 	model, _ := app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'?'}})
+	app = model.(*App)
+	if app.mode != modeMain {
+		t.Fatalf("expected main mode, got %s", app.mode)
+	}
+}
+
+func TestShareOpensFromLogAndCloses(t *testing.T) {
+	buf, err := buffer.New(100, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	buf.Append("stdout", `level=INFO msg="hello"`)
+	app := New(config.Default(), "", []detect.Command{{ID: "cmd", Title: "Cmd", Cmd: "echo hi"}}, "cmd", buf, runner.New())
+	app.height = 20
+
+	model, _ := app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	app = model.(*App)
+	if app.mode != modeShare {
+		t.Fatalf("expected share mode, got %s", app.mode)
+	}
+	if app.share.contents == "" {
+		t.Fatal("expected share contents to be set")
+	}
+
+	model, _ = app.Update(tea.KeyMsg{Type: tea.KeyEsc})
 	app = model.(*App)
 	if app.mode != modeMain {
 		t.Fatalf("expected main mode, got %s", app.mode)
@@ -93,10 +118,10 @@ func TestLogInputBarKeepsSecondaryKeysOut(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	app := New(config.Default(), "", []detect.Command{{ID: "cmd", Title: "Cmd", Cmd: "echo hi"}}, "cmd", buf, runner.New(), nil)
+	app := New(config.Default(), "", []detect.Command{{ID: "cmd", Title: "Cmd", Cmd: "echo hi"}}, "cmd", buf, runner.New())
 
-	bar := app.logPane.InputBar()
-	for _, key := range []string{"[s]", "[w]", "[c]", "[enter]"} {
+	bar := app.inputBar()
+	for _, key := range []string{"[s]", "[enter]"} {
 		if strings.Contains(bar, key) {
 			t.Fatalf("expected input bar not to contain %s: %q", key, bar)
 		}
@@ -114,7 +139,7 @@ func TestQueryUpdatesLive(t *testing.T) {
 	buf.Append("stdout", `level=INFO msg="thread example heartbeat"`)
 	buf.Append("stdout", `level=ERROR msg="other event"`)
 
-	app := New(config.Default(), "", []detect.Command{{ID: "cmd", Title: "Cmd", Cmd: "echo hi"}}, "cmd", buf, runner.New(), nil)
+	app := New(config.Default(), "", []detect.Command{{ID: "cmd", Title: "Cmd", Cmd: "echo hi"}}, "cmd", buf, runner.New())
 	model, _ := app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'f'}})
 	app = model.(*App)
 
@@ -159,7 +184,7 @@ func TestPresetSwitchChangesVisibleLines(t *testing.T) {
 	buf.Append("stdout", `level=INFO msg="ok"`)
 	buf.Append("stdout", `level=ERROR msg="bad"`)
 
-	app := New(cfg, "", []detect.Command{{ID: "cmd", Title: "Cmd", Cmd: "echo hi"}}, "cmd", buf, runner.New(), nil)
+	app := New(cfg, "", []detect.Command{{ID: "cmd", Title: "Cmd", Cmd: "echo hi"}}, "cmd", buf, runner.New())
 	if got := len(app.snapshotLines()); got != 2 {
 		t.Fatalf("before switch len = %d", got)
 	}
@@ -185,7 +210,7 @@ func TestArrowLeftRightSwitchPresets(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	app := New(cfg, "", []detect.Command{{ID: "cmd", Title: "Cmd", Cmd: "echo hi"}}, "cmd", buf, runner.New(), nil)
+	app := New(cfg, "", []detect.Command{{ID: "cmd", Title: "Cmd", Cmd: "echo hi"}}, "cmd", buf, runner.New())
 
 	model, _ := app.Update(tea.KeyMsg{Type: tea.KeyRight})
 	app = model.(*App)
@@ -216,7 +241,7 @@ func TestPresetSwitchJumpsToTail(t *testing.T) {
 		buf.Append("stdout", line)
 	}
 
-	app := New(cfg, "", []detect.Command{{ID: "cmd", Title: "Cmd", Cmd: "echo hi"}}, "cmd", buf, runner.New(), nil)
+	app := New(cfg, "", []detect.Command{{ID: "cmd", Title: "Cmd", Cmd: "echo hi"}}, "cmd", buf, runner.New())
 	app.height = 20
 	app.logPane.cursor = 0
 	app.logPane.autoScroll = false
@@ -243,7 +268,7 @@ func TestRenderLineHidesTimeColumnForNonTimeFormats(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	app := New(cfg, "", []detect.Command{{ID: "cmd", Title: "Cmd", Cmd: "echo hi"}}, "cmd", buf, runner.New(), nil)
+	app := New(cfg, "", []detect.Command{{ID: "cmd", Title: "Cmd", Cmd: "echo hi"}}, "cmd", buf, runner.New())
 
 	rendered := app.renderLine(buffer.ViewLine{
 		Line: buffer.Line{
@@ -271,7 +296,7 @@ func TestRenderLineWrapsAfterFixedTimeColumn(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	app := New(cfg, "", []detect.Command{{ID: "cmd", Title: "Cmd", Cmd: "echo hi"}}, "cmd", buf, runner.New(), nil)
+	app := New(cfg, "", []detect.Command{{ID: "cmd", Title: "Cmd", Cmd: "echo hi"}}, "cmd", buf, runner.New())
 
 	rendered := app.renderLine(buffer.ViewLine{
 		Line: buffer.Line{
@@ -305,7 +330,7 @@ func TestRenderLineHonorsHiddenFieldsAndShowsNewFields(t *testing.T) {
 		t.Fatal(err)
 	}
 	buf.Append("stdout", `level=INFO msg="hello" component=api`)
-	app := New(cfg, "", []detect.Command{{ID: "cmd", Title: "Cmd", Cmd: "echo hi"}}, "cmd", buf, runner.New(), nil)
+	app := New(cfg, "", []detect.Command{{ID: "cmd", Title: "Cmd", Cmd: "echo hi"}}, "cmd", buf, runner.New())
 
 	rendered := app.renderLine(app.snapshotLines()[0], 120)
 	if strings.Contains(rendered, "level=info") {
@@ -332,7 +357,7 @@ func TestFieldMenuOpensNavigatesTogglesAndCloses(t *testing.T) {
 	}
 	buf.Append("stdout", `level=INFO msg="hello" component=api`)
 
-	app := New(cfg, "", []detect.Command{{ID: "cmd", Title: "Cmd", Cmd: "echo hi"}}, "cmd", buf, runner.New(), nil)
+	app := New(cfg, "", []detect.Command{{ID: "cmd", Title: "Cmd", Cmd: "echo hi"}}, "cmd", buf, runner.New())
 	app.width = 100
 	app.height = 30
 
@@ -373,7 +398,7 @@ func TestFieldMenuShowsNewKeysWhileOpen(t *testing.T) {
 	}
 	buf.Append("stdout", `level=INFO msg="hello"`)
 
-	app := New(config.Default(), "", []detect.Command{{ID: "cmd", Title: "Cmd", Cmd: "echo hi"}}, "cmd", buf, runner.New(), nil)
+	app := New(config.Default(), "", []detect.Command{{ID: "cmd", Title: "Cmd", Cmd: "echo hi"}}, "cmd", buf, runner.New())
 	app.width = 100
 	app.height = 30
 
@@ -399,7 +424,7 @@ func TestFieldMenuFiltersWhileTyping(t *testing.T) {
 	}
 	buf.Append("stdout", `level=INFO msg="hello" component=api request_id=abc`)
 
-	app := New(cfg, "", []detect.Command{{ID: "cmd", Title: "Cmd", Cmd: "echo hi"}}, "cmd", buf, runner.New(), nil)
+	app := New(cfg, "", []detect.Command{{ID: "cmd", Title: "Cmd", Cmd: "echo hi"}}, "cmd", buf, runner.New())
 	app.width = 100
 	app.height = 30
 
@@ -447,7 +472,7 @@ func TestFieldMenuScrollsWhenManyFieldsExist(t *testing.T) {
 		buf.Append("stdout", fmt.Sprintf("field_%02d=value", idx))
 	}
 
-	app := New(config.Default(), "", []detect.Command{{ID: "cmd", Title: "Cmd", Cmd: "echo hi"}}, "cmd", buf, runner.New(), nil)
+	app := New(config.Default(), "", []detect.Command{{ID: "cmd", Title: "Cmd", Cmd: "echo hi"}}, "cmd", buf, runner.New())
 	app.width = 100
 	app.height = 14
 
@@ -470,6 +495,114 @@ func TestFieldMenuScrollsWhenManyFieldsExist(t *testing.T) {
 	}
 }
 
+func TestGroupFilterDefaultsShowAllLines(t *testing.T) {
+	buf, err := buffer.New(100, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	buf.Append("stdout", `level=INFO component=api msg="ready"`)
+	buf.Append("stdout", `level=ERROR component=api msg="bad"`)
+	buf.Append("stdout", `level=ERROR component=worker msg="bad"`)
+
+	app := New(config.Default(), "", []detect.Command{{ID: "cmd", Title: "Cmd", Cmd: "echo hi"}}, "cmd", buf, runner.New())
+	if app.groupField != config.DefaultGroupField {
+		t.Fatalf("groupField = %q, want %q", app.groupField, config.DefaultGroupField)
+	}
+	if app.groupValue != "" {
+		t.Fatalf("groupValue = %q, want empty", app.groupValue)
+	}
+	if got := len(app.snapshotLines()); got != 3 {
+		t.Fatalf("expected all lines visible, got %d", got)
+	}
+}
+
+func TestGroupValueCycleFiltersExactMatch(t *testing.T) {
+	buf, err := buffer.New(100, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	buf.Append("stdout", `level=INFO component=api msg="ready"`)
+	buf.Append("stdout", `level=ERROR component=api msg="bad"`)
+	buf.Append("stdout", `level=ERROR component=worker msg="bad"`)
+
+	app := New(config.Default(), "", []detect.Command{{ID: "cmd", Title: "Cmd", Cmd: "echo hi"}}, "cmd", buf, runner.New())
+	app.width = 100
+	app.height = 30
+	app.focus = paneLog
+
+	model, _ := app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'.'}})
+	app = model.(*App)
+	if got := len(app.snapshotLines()); got != 2 {
+		t.Fatalf("expected api group to leave 2 lines, got %d", got)
+	}
+	if got := app.groupValue; got != "api" {
+		t.Fatalf("groupValue = %q, want api", got)
+	}
+
+	model, _ = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'.'}})
+	app = model.(*App)
+	if got := len(app.snapshotLines()); got != 1 {
+		t.Fatalf("expected worker group to leave 1 line, got %d", got)
+	}
+	if got := app.groupValue; got != "worker" {
+		t.Fatalf("groupValue = %q, want worker", got)
+	}
+
+	model, _ = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'.'}})
+	app = model.(*App)
+	if got := len(app.snapshotLines()); got != 3 {
+		t.Fatalf("expected all group to restore 3 lines, got %d", got)
+	}
+	if app.groupValue != "" {
+		t.Fatalf("groupValue = %q, want empty", app.groupValue)
+	}
+}
+
+func TestGroupMenuSelectFieldResetsValue(t *testing.T) {
+	buf, err := buffer.New(100, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	buf.Append("stdout", `level=INFO component=api`)
+	buf.Append("stdout", `level=ERROR component=api`)
+
+	app := New(config.Default(), "", []detect.Command{{ID: "cmd", Title: "Cmd", Cmd: "echo hi"}}, "cmd", buf, runner.New())
+	app.width = 100
+	app.height = 30
+	app.groupValue = "api"
+
+	model, _ := app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'b'}})
+	app = model.(*App)
+	if app.mode != modeGroup {
+		t.Fatalf("expected group mode, got %s", app.mode)
+	}
+
+	for _, r := range []rune("level") {
+		model, _ = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		app = model.(*App)
+	}
+	model, _ = app.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	app = model.(*App)
+	if app.mode != modeMain {
+		t.Fatalf("expected main mode, got %s", app.mode)
+	}
+	if app.groupField != "level" {
+		t.Fatalf("groupField = %q, want level", app.groupField)
+	}
+	if app.groupValue != "" {
+		t.Fatalf("groupValue = %q, want empty after field change", app.groupValue)
+	}
+
+	model, _ = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'.'}})
+	app = model.(*App)
+	if got := len(app.snapshotLines()); got != 1 {
+		t.Fatalf("expected level=error filter to leave 1 line, got %d", got)
+	}
+	if app.groupValue != "error" {
+		t.Fatalf("groupValue = %q, want error", app.groupValue)
+	}
+}
+
 func TestFieldFilterDialogFiltersLiveWithANDLogic(t *testing.T) {
 	buf, err := buffer.New(100, nil)
 	if err != nil {
@@ -479,7 +612,7 @@ func TestFieldFilterDialogFiltersLiveWithANDLogic(t *testing.T) {
 	buf.Append("stdout", `level=ERROR component=api msg="bad"`)
 	buf.Append("stdout", `level=ERROR component=worker msg="bad"`)
 
-	app := New(config.Default(), "", []detect.Command{{ID: "cmd", Title: "Cmd", Cmd: "echo hi"}}, "cmd", buf, runner.New(), nil)
+	app := New(config.Default(), "", []detect.Command{{ID: "cmd", Title: "Cmd", Cmd: "echo hi"}}, "cmd", buf, runner.New())
 	app.width = 100
 	app.height = 30
 
@@ -538,7 +671,7 @@ func TestFieldFilterDialogBackspaceRemovesEmptyValue(t *testing.T) {
 	buf.Append("stdout", `level=ERROR msg="bad"`)
 	buf.Append("stdout", `level=INFO msg="ok"`)
 
-	app := New(config.Default(), "", []detect.Command{{ID: "cmd", Title: "Cmd", Cmd: "echo hi"}}, "cmd", buf, runner.New(), nil)
+	app := New(config.Default(), "", []detect.Command{{ID: "cmd", Title: "Cmd", Cmd: "echo hi"}}, "cmd", buf, runner.New())
 	app.width = 100
 	app.height = 30
 
@@ -575,7 +708,7 @@ func TestFieldFilterDialogScrollsWhenManyFieldsExist(t *testing.T) {
 		buf.Append("stdout", fmt.Sprintf("field_%02d=value", idx))
 	}
 
-	app := New(config.Default(), "", []detect.Command{{ID: "cmd", Title: "Cmd", Cmd: "echo hi"}}, "cmd", buf, runner.New(), nil)
+	app := New(config.Default(), "", []detect.Command{{ID: "cmd", Title: "Cmd", Cmd: "echo hi"}}, "cmd", buf, runner.New())
 	app.width = 100
 	app.height = 14
 
@@ -605,7 +738,7 @@ func TestFieldFilterDialogEscLeavesEditBeforeClosing(t *testing.T) {
 	}
 	buf.Append("stdout", `level=ERROR msg="bad"`)
 
-	app := New(config.Default(), "", []detect.Command{{ID: "cmd", Title: "Cmd", Cmd: "echo hi"}}, "cmd", buf, runner.New(), nil)
+	app := New(config.Default(), "", []detect.Command{{ID: "cmd", Title: "Cmd", Cmd: "echo hi"}}, "cmd", buf, runner.New())
 	app.width = 100
 	app.height = 30
 
@@ -640,7 +773,7 @@ func TestConfigEditorReceivesLiveHiddenFields(t *testing.T) {
 	}
 	buf.Append("stdout", `level=INFO msg="hello"`)
 
-	app := New(cfg, "", []detect.Command{{ID: "cmd", Title: "Cmd", Cmd: "echo hi"}}, "cmd", buf, runner.New(), nil)
+	app := New(cfg, "", []detect.Command{{ID: "cmd", Title: "Cmd", Cmd: "echo hi"}}, "cmd", buf, runner.New())
 
 	model, _ := app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'v'}})
 	app = model.(*App)
@@ -672,7 +805,7 @@ func TestRenderLineUsesDefaultPaletteForStructuralLogText(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	app := New(cfg, "", []detect.Command{{ID: "cmd", Title: "Cmd", Cmd: "echo hi"}}, "cmd", buf, runner.New(), nil)
+	app := New(cfg, "", []detect.Command{{ID: "cmd", Title: "Cmd", Cmd: "echo hi"}}, "cmd", buf, runner.New())
 
 	rendered := app.renderLine(buffer.ViewLine{
 		Line: buffer.Line{
@@ -699,7 +832,7 @@ func TestConfigEditorCyclesLogPalette(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	app := New(cfg, "", []detect.Command{{ID: "cmd", Title: "Cmd", Cmd: "echo hi"}}, "cmd", buf, runner.New(), nil)
+	app := New(cfg, "", []detect.Command{{ID: "cmd", Title: "Cmd", Cmd: "echo hi"}}, "cmd", buf, runner.New())
 	app.editor.Open(cfg)
 
 	row, ok := findEditorRow(app.editor.rows(), editorPalette)
@@ -724,7 +857,7 @@ func TestViNavigationMovesCursor(t *testing.T) {
 		buf.Append("stdout", "line")
 	}
 
-	app := New(config.Default(), "", []detect.Command{{ID: "cmd", Title: "Cmd", Cmd: "echo hi"}}, "cmd", buf, runner.New(), nil)
+	app := New(config.Default(), "", []detect.Command{{ID: "cmd", Title: "Cmd", Cmd: "echo hi"}}, "cmd", buf, runner.New())
 	app.height = 20
 
 	model, _ := app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
@@ -748,7 +881,7 @@ func TestEnterMovesToEndAndDoubleEnterAddsSeparator(t *testing.T) {
 	buf.Append("stdout", "first")
 	buf.Append("stdout", "second")
 
-	app := New(config.Default(), "", []detect.Command{{ID: "cmd", Title: "Cmd", Cmd: "echo hi"}}, "cmd", buf, runner.New(), nil)
+	app := New(config.Default(), "", []detect.Command{{ID: "cmd", Title: "Cmd", Cmd: "echo hi"}}, "cmd", buf, runner.New())
 
 	model, _ := app.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	app = model.(*App)
@@ -787,7 +920,7 @@ func TestManualScrollPausesAutoScrollUntilEnd(t *testing.T) {
 	buf.Append("stdout", "second")
 	buf.Append("stdout", "third")
 
-	app := New(config.Default(), "", []detect.Command{{ID: "cmd", Title: "Cmd", Cmd: "echo hi"}}, "cmd", buf, runner.New(), nil)
+	app := New(config.Default(), "", []detect.Command{{ID: "cmd", Title: "Cmd", Cmd: "echo hi"}}, "cmd", buf, runner.New())
 	app.height = 20
 	app.logPane.cursor = 2
 	app.logPane.autoScroll = true
@@ -832,7 +965,7 @@ func TestPageUpEntersSelectionMode(t *testing.T) {
 		buf.Append("stdout", fmt.Sprintf("line-%d", idx))
 	}
 
-	app := New(config.Default(), "", []detect.Command{{ID: "cmd", Title: "Cmd", Cmd: "echo hi"}}, "cmd", buf, runner.New(), nil)
+	app := New(config.Default(), "", []detect.Command{{ID: "cmd", Title: "Cmd", Cmd: "echo hi"}}, "cmd", buf, runner.New())
 	app.height = 20
 	app.logPane.cursor = 9
 	app.logPane.autoScroll = true
@@ -847,7 +980,209 @@ func TestPageUpEntersSelectionMode(t *testing.T) {
 	}
 }
 
-func TestScrollingPastShortMemoryExpandsLogWindow(t *testing.T) {
+func TestSelectionModePausesAutoScrollAtTail(t *testing.T) {
+	buf, err := buffer.New(100, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	buf.Append("stdout", "first")
+	buf.Append("stdout", "second")
+	buf.Append("stdout", "third")
+
+	app := New(config.Default(), "", []detect.Command{{ID: "cmd", Title: "Cmd", Cmd: "echo hi"}}, "cmd", buf, runner.New())
+	app.height = 20
+	app.logPane.cursor = 2
+	app.logPane.autoScroll = true
+	lines := app.snapshotLines()
+	app.syncLogViewport(lines)
+	viewportBefore := app.logPane.viewportTop
+
+	model, _ := app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'k'}})
+	app = model.(*App)
+	if !app.logPane.selecting {
+		t.Fatal("expected cursor navigation to enter selection mode")
+	}
+	if app.logPane.autoScroll {
+		t.Fatal("expected selection mode to pause auto scroll")
+	}
+	cursorBefore := app.logPane.cursor
+
+	_, _ = app.handleRunner(runner.Event{Type: runner.EventOutput, Source: "stdout", Text: "fourth"})
+	app.flushPendingOutput()
+	if app.logPane.autoScroll {
+		t.Fatal("expected auto scroll to stay off in selection mode")
+	}
+	if app.logPane.cursor != cursorBefore {
+		t.Fatalf("expected cursor to stay at %d, got %d", cursorBefore, app.logPane.cursor)
+	}
+	if app.logPane.viewportTop != viewportBefore {
+		t.Fatalf("expected viewportTop to stay at %d, got %d", viewportBefore, app.logPane.viewportTop)
+	}
+}
+
+func TestSelectionModeFreezesViewportWhenPinnedAtTail(t *testing.T) {
+	buf, err := buffer.New(100, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for idx := 0; idx < 8; idx++ {
+		buf.Append("stdout", fmt.Sprintf("line-%d", idx))
+	}
+
+	app := New(config.Default(), "", []detect.Command{{ID: "cmd", Title: "Cmd", Cmd: "echo hi"}}, "cmd", buf, runner.New())
+	app.width = 80
+	app.height = 8
+	lines := app.snapshotLines()
+	app.logPane.moveToEnd(lines)
+	app.syncLogViewport(lines)
+
+	model, _ := app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'k'}})
+	app = model.(*App)
+	if !app.logPane.selecting {
+		t.Fatal("expected selection mode")
+	}
+	if app.logPane.frozenViewportEnd == 0 {
+		t.Fatal("expected viewport end to be pinned in selection mode")
+	}
+	viewportBefore := app.logPane.viewportTop
+	capBefore := app.logPane.frozenViewportEnd
+
+	_, _ = app.handleRunner(runner.Event{Type: runner.EventOutput, Source: "stdout", Text: "line-new"})
+	app.flushPendingOutput()
+
+	if app.logPane.viewportTop != viewportBefore {
+		t.Fatalf("expected viewportTop to stay at %d, got %d", viewportBefore, app.logPane.viewportTop)
+	}
+	if app.logPane.frozenViewportEnd != capBefore {
+		t.Fatalf("expected viewport end cap to stay at %d, got %d", capBefore, app.logPane.frozenViewportEnd)
+	}
+	_, end := app.logPane.visibleRange(app.logPaneWidth(), app.bodyHeight(), app.snapshotLines(), app.buf.ObservedFields(), app.cfg.UI.LogView)
+	if end > capBefore {
+		t.Fatalf("expected visible range end %d to stay capped at %d", end, capBefore)
+	}
+}
+
+func TestAutoScrollFollowsRingBufferTail(t *testing.T) {
+	buf, err := buffer.New(5, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for idx := 0; idx < 8; idx++ {
+		buf.Append("stdout", fmt.Sprintf("line-%d", idx))
+	}
+
+	app := New(config.Default(), "", []detect.Command{{ID: "cmd", Title: "Cmd", Cmd: "echo hi"}}, "cmd", buf, runner.New())
+	app.height = 20
+	app.logPane.autoScroll = true
+	lines := app.snapshotLines()
+	app.syncLogViewport(lines)
+
+	if got := lines[len(lines)-1].Text; got != "line-7" {
+		t.Fatalf("expected snapshot tail line-7, got %q", got)
+	}
+
+	_, _ = app.handleRunner(runner.Event{Type: runner.EventOutput, Source: "stdout", Text: "line-8"})
+	app.flushPendingOutput()
+	lines = app.snapshotLines()
+	if got := lines[len(lines)-1].Text; got != "line-8" {
+		t.Fatalf("expected autoscroll tail line-8, got %q", got)
+	}
+	if !app.logPane.autoScroll {
+		t.Fatal("expected autoscroll to stay enabled at tail")
+	}
+	if app.logPane.cursor != len(lines)-1 {
+		t.Fatalf("expected cursor at tail %d, got %d", len(lines)-1, app.logPane.cursor)
+	}
+}
+
+func TestPausedViewportTracksAnchoredLineAfterSnapshotShift(t *testing.T) {
+	buf, err := buffer.New(5, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for idx := 0; idx < 8; idx++ {
+		buf.Append("stdout", fmt.Sprintf("line-%d", idx))
+	}
+
+	app := New(config.Default(), "", []detect.Command{{ID: "cmd", Title: "Cmd", Cmd: "echo hi"}}, "cmd", buf, runner.New())
+	app.width = 80
+	app.height = 8
+	lines := app.snapshotLines()
+	var want buffer.ViewLine
+	for idx, line := range lines {
+		if line.Text == "line-7" {
+			want = line
+			app.logPane.cursor = idx
+			break
+		}
+	}
+	if want.Text == "" {
+		t.Fatal("expected line-7 in snapshot")
+	}
+	app.logPane.selecting = true
+	app.logPane.bindCursorLine(lines)
+	app.logPane.syncAutoScroll(lines)
+	app.syncLogViewport(lines)
+
+	_, _ = app.handleRunner(runner.Event{Type: runner.EventOutput, Source: "stdout", Text: "line-8"})
+	app.flushPendingOutput()
+
+	lines = app.snapshotLines()
+	line, ok := app.logPane.currentLine(lines)
+	if !ok || line.Text != want.Text {
+		t.Fatalf("expected anchored line %q, got %+v", want.Text, line)
+	}
+	if app.logPane.autoScroll {
+		t.Fatal("expected paused tail-follow in selection mode")
+	}
+}
+
+func TestSelectionAnchorsRingBufferLine(t *testing.T) {
+	buf, err := buffer.New(5, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for idx := 0; idx < 8; idx++ {
+		buf.Append("stdout", fmt.Sprintf("line-%d", idx))
+	}
+
+	app := New(config.Default(), "", []detect.Command{{ID: "cmd", Title: "Cmd", Cmd: "echo hi"}}, "cmd", buf, runner.New())
+	app.height = 20
+	lines := app.snapshotLines()
+	var target buffer.ViewLine
+	for idx, line := range lines {
+		if line.Text == "line-7" {
+			target = line
+			app.logPane.cursor = idx
+			break
+		}
+	}
+	if target.Text == "" {
+		t.Fatal("expected line-7 in snapshot")
+	}
+	app.logPane.selecting = true
+	app.logPane.bindCursorLine(lines)
+	app.logPane.syncAutoScroll(lines)
+	app.syncLogViewport(lines)
+
+	_, _ = app.handleRunner(runner.Event{Type: runner.EventOutput, Source: "stdout", Text: "line-8"})
+	app.flushPendingOutput()
+
+	lines = app.snapshotLines()
+	app.logPane.resolveCursorLine(lines)
+	line, ok := app.logPane.currentLine(lines)
+	if !ok {
+		t.Fatal("expected anchored line to resolve")
+	}
+	if line.Index != target.Index {
+		t.Fatalf("expected anchored buffer index %d, got %d", target.Index, line.Index)
+	}
+	if line.Text != target.Text {
+		t.Fatalf("expected anchored text %q, got %q", target.Text, line.Text)
+	}
+}
+
+func TestSnapshotIncludesFullRingBuffer(t *testing.T) {
 	buf, err := buffer.New(2000, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -856,29 +1191,28 @@ func TestScrollingPastShortMemoryExpandsLogWindow(t *testing.T) {
 		buf.Append("stdout", fmt.Sprintf("line-%04d", idx))
 	}
 
-	app := New(config.Default(), "", []detect.Command{{ID: "cmd", Title: "Cmd", Cmd: "echo hi"}}, "cmd", buf, runner.New(), nil)
+	app := New(config.Default(), "", []detect.Command{{ID: "cmd", Title: "Cmd", Cmd: "echo hi"}}, "cmd", buf, runner.New())
 	app.height = 20
 
 	lines := app.snapshotLines()
-	if len(lines) != logShortMemoryLines {
-		t.Fatalf("initial window len = %d, want %d", len(lines), logShortMemoryLines)
+	if len(lines) != 1505 {
+		t.Fatalf("snapshot len = %d, want 1505", len(lines))
 	}
-	if lines[0].Text != "line-0505" {
-		t.Fatalf("initial window first line = %q", lines[0].Text)
+	if lines[0].Text != "line-0000" {
+		t.Fatalf("snapshot first line = %q", lines[0].Text)
+	}
+	if lines[len(lines)-1].Text != "line-1504" {
+		t.Fatalf("snapshot last line = %q", lines[len(lines)-1].Text)
 	}
 
 	app.logPane.cursor = 0
 	model, _ := app.Update(tea.KeyMsg{Type: tea.KeyUp})
 	app = model.(*App)
-	lines = app.snapshotLines()
-	if len(lines) != 1505 {
-		t.Fatalf("expanded window len = %d, want 1505", len(lines))
-	}
-	if lines[0].Text != "line-0000" {
-		t.Fatalf("expanded window first line = %q", lines[0].Text)
-	}
 	if !app.logPane.selecting {
-		t.Fatal("expected expanding scroll to keep selection mode")
+		t.Fatal("expected scrolling up to enter selection mode")
+	}
+	if got := app.snapshotLines()[app.logPane.cursor].Text; got != "line-0000" {
+		t.Fatalf("cursor line = %q", got)
 	}
 }
 
@@ -887,7 +1221,7 @@ func TestRunnerOutputBatchesUntilFlush(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	app := New(config.Default(), "", []detect.Command{{ID: "cmd", Title: "Cmd", Cmd: "echo hi"}}, "cmd", buf, runner.New(), nil)
+	app := New(config.Default(), "", []detect.Command{{ID: "cmd", Title: "Cmd", Cmd: "echo hi"}}, "cmd", buf, runner.New())
 
 	_, _ = app.handleRunner(runner.Event{Type: runner.EventOutput, Source: "stdout", Text: "one"})
 	_, _ = app.handleRunner(runner.Event{Type: runner.EventOutput, Source: "stdout", Text: "two"})
@@ -914,7 +1248,7 @@ func TestMouseWheelScrollPausesAutoScroll(t *testing.T) {
 		buf.Append("stdout", line)
 	}
 
-	app := New(config.Default(), "", []detect.Command{{ID: "cmd", Title: "Cmd", Cmd: "echo hi"}}, "cmd", buf, runner.New(), nil)
+	app := New(config.Default(), "", []detect.Command{{ID: "cmd", Title: "Cmd", Cmd: "echo hi"}}, "cmd", buf, runner.New())
 	app.width = 100
 	app.height = 20
 	app.logPane.cursor = 2
@@ -940,7 +1274,7 @@ func TestSelectionModeOpensDetailView(t *testing.T) {
 	}
 	buf.Append("stdout", `level=INFO payload="{\"ok\":true,\"count\":2}" msg="hello world"`)
 
-	app := New(config.Default(), "", []detect.Command{{ID: "cmd", Title: "Cmd", Cmd: "echo hi"}}, "cmd", buf, runner.New(), nil)
+	app := New(config.Default(), "", []detect.Command{{ID: "cmd", Title: "Cmd", Cmd: "echo hi"}}, "cmd", buf, runner.New())
 	model, _ := app.Update(tea.KeyMsg{Type: tea.KeyDown})
 	app = model.(*App)
 	if !app.logPane.selecting {
@@ -976,7 +1310,7 @@ func TestEscCancelsSelectionMode(t *testing.T) {
 	}
 	buf.Append("stdout", `level=INFO msg="hello world"`)
 
-	app := New(config.Default(), "", []detect.Command{{ID: "cmd", Title: "Cmd", Cmd: "echo hi"}}, "cmd", buf, runner.New(), nil)
+	app := New(config.Default(), "", []detect.Command{{ID: "cmd", Title: "Cmd", Cmd: "echo hi"}}, "cmd", buf, runner.New())
 	model, _ := app.Update(tea.KeyMsg{Type: tea.KeyDown})
 	app = model.(*App)
 	if !app.logPane.selecting {
@@ -1002,7 +1336,7 @@ func TestEscSelectionExitReturnsToTail(t *testing.T) {
 		buf.Append("stdout", line)
 	}
 
-	app := New(config.Default(), "", []detect.Command{{ID: "cmd", Title: "Cmd", Cmd: "echo hi"}}, "cmd", buf, runner.New(), nil)
+	app := New(config.Default(), "", []detect.Command{{ID: "cmd", Title: "Cmd", Cmd: "echo hi"}}, "cmd", buf, runner.New())
 	app.height = 20
 	app.logPane.cursor = 0
 	app.logPane.selecting = true
@@ -1025,7 +1359,7 @@ func TestSKeyDoesNotToggleSelection(t *testing.T) {
 	}
 	buf.Append("stdout", "first")
 
-	app := New(config.Default(), "", []detect.Command{{ID: "cmd", Title: "Cmd", Cmd: "echo hi"}}, "cmd", buf, runner.New(), nil)
+	app := New(config.Default(), "", []detect.Command{{ID: "cmd", Title: "Cmd", Cmd: "echo hi"}}, "cmd", buf, runner.New())
 	model, _ := app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
 	app = model.(*App)
 	if app.logPane.selecting {
@@ -1041,7 +1375,7 @@ func TestTruncateLogsKeyClearsBufferAndTails(t *testing.T) {
 	buf.Append("stdout", `level=INFO msg="hello"`)
 	buf.Append("stdout", `level=ERROR msg="bad"`)
 
-	app := New(config.Default(), "", []detect.Command{{ID: "cmd", Title: "Cmd", Cmd: "echo hi"}}, "cmd", buf, runner.New(), nil)
+	app := New(config.Default(), "", []detect.Command{{ID: "cmd", Title: "Cmd", Cmd: "echo hi"}}, "cmd", buf, runner.New())
 	app.height = 20
 	app.logPane.cursor = 0
 	app.logPane.autoScroll = false
@@ -1072,7 +1406,7 @@ func TestMouseClickSelectsLine(t *testing.T) {
 	buf.Append("stdout", `level=INFO msg="first"`)
 	buf.Append("stdout", `level=ERROR msg="second"`)
 
-	app := New(config.Default(), "", []detect.Command{{ID: "cmd", Title: "Cmd", Cmd: "echo hi"}}, "cmd", buf, runner.New(), nil)
+	app := New(config.Default(), "", []detect.Command{{ID: "cmd", Title: "Cmd", Cmd: "echo hi"}}, "cmd", buf, runner.New())
 	app.width = 100
 	app.height = 20
 
@@ -1107,7 +1441,7 @@ func TestMouseClickUsesVisibleViewport(t *testing.T) {
 		buf.Append("stdout", "line "+string(rune('a'+i)))
 	}
 
-	app := New(config.Default(), "", []detect.Command{{ID: "cmd", Title: "Cmd", Cmd: "echo hi"}}, "cmd", buf, runner.New(), nil)
+	app := New(config.Default(), "", []detect.Command{{ID: "cmd", Title: "Cmd", Cmd: "echo hi"}}, "cmd", buf, runner.New())
 	app.width = 100
 	app.height = 8
 	lines := app.snapshotLines()
@@ -1148,7 +1482,7 @@ func TestMouseClickHandlesWrappedViewportRows(t *testing.T) {
 		buf.Append("stdout", "this is a deliberately long wrapped log line that should span multiple viewport rows")
 	}
 
-	app := New(cfg, "", []detect.Command{{ID: "cmd", Title: "Cmd", Cmd: "echo hi"}}, "cmd", buf, runner.New(), nil)
+	app := New(cfg, "", []detect.Command{{ID: "cmd", Title: "Cmd", Cmd: "echo hi"}}, "cmd", buf, runner.New())
 	app.width = 50
 	app.height = 10
 	lines := app.snapshotLines()
@@ -1177,7 +1511,7 @@ func TestMouseDoubleClickOpensDetailView(t *testing.T) {
 	}
 	buf.Append("stdout", `level=INFO payload="{\"ok\":true}" msg="double click"`)
 
-	app := New(config.Default(), "", []detect.Command{{ID: "cmd", Title: "Cmd", Cmd: "echo hi"}}, "cmd", buf, runner.New(), nil)
+	app := New(config.Default(), "", []detect.Command{{ID: "cmd", Title: "Cmd", Cmd: "echo hi"}}, "cmd", buf, runner.New())
 	app.width = 100
 	app.height = 20
 
@@ -1242,7 +1576,7 @@ func TestPresetSwitchAppliesActiveStreams(t *testing.T) {
 	}
 	streams := stream.New(cfg.Streams, t.TempDir())
 	defer streams.StopAll()
-	app := NewWithStreams(cfg, "", []detect.Command{{ID: "cmd", Title: "Cmd", Cmd: "echo hi"}}, "cmd", buf, runner.New(), streams, nil)
+	app := NewWithStreams(cfg, "", []detect.Command{{ID: "cmd", Title: "Cmd", Cmd: "echo hi"}}, "cmd", buf, runner.New(), streams)
 	app.applyActiveStreams()
 
 	if got := streams.ActiveCount(); got != 0 {
@@ -1265,7 +1599,7 @@ func TestStreamOutputUsesGlobalSnapshotSearch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	app := NewWithStreams(cfg, "", []detect.Command{{ID: "cmd", Title: "Cmd", Cmd: "echo hi"}}, "cmd", buf, runner.New(), stream.New(cfg.Streams, t.TempDir()), nil)
+	app := NewWithStreams(cfg, "", []detect.Command{{ID: "cmd", Title: "Cmd", Cmd: "echo hi"}}, "cmd", buf, runner.New(), stream.New(cfg.Streams, t.TempDir()))
 	app.logPane.query = "level=error"
 
 	model, _ := app.handleStream(stream.Event{Type: stream.EventOutput, StreamID: "app", Source: "app", Text: `level=ERROR msg="from stream"`})
@@ -1293,7 +1627,7 @@ func TestOnDemandProcessStreamStartsFromPane(t *testing.T) {
 	}
 	streams := stream.New(cfg.Streams, t.TempDir())
 	defer streams.StopAll()
-	app := NewWithStreams(cfg, "", []detect.Command{{ID: "cmd", Title: "Cmd", Cmd: "echo hi"}}, "cmd", buf, runner.New(), streams, nil)
+	app := NewWithStreams(cfg, "", []detect.Command{{ID: "cmd", Title: "Cmd", Cmd: "echo hi"}}, "cmd", buf, runner.New(), streams)
 	app.applyActiveStreams()
 	if got := streams.ActiveCount(); got != 0 {
 		t.Fatalf("active streams before on-demand start = %d, want 0", got)
@@ -1322,97 +1656,11 @@ func TestAutoStartProcessStreamStartsWithoutPresetStreamList(t *testing.T) {
 	streams := stream.New(cfg.Streams, t.TempDir())
 	defer streams.StopAll()
 
-	app := NewWithStreams(cfg, "", []detect.Command{{ID: "cmd", Title: "Cmd", Cmd: "echo hi"}}, "cmd", buf, runner.New(), streams, nil)
+	app := NewWithStreams(cfg, "", []detect.Command{{ID: "cmd", Title: "Cmd", Cmd: "echo hi"}}, "cmd", buf, runner.New(), streams)
 	app.applyActiveStreams()
 
 	if got := streams.ActiveCount(); got != 1 {
 		t.Fatalf("active streams = %d, want 1", got)
-	}
-}
-
-func TestCommandPaneEnterStartsCommandOutputPane(t *testing.T) {
-	cfg := config.Default()
-
-	buf, err := buffer.New(100, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	streams := stream.New(nil, t.TempDir())
-	defer streams.StopAll()
-
-	commands := []detect.Command{
-		{ID: "first", Title: "First", Cmd: "echo first"},
-		{ID: "second", Title: "Second", Cmd: "echo second"},
-	}
-
-	app := NewWithStreams(cfg, "", commands, "first", buf, runner.New(), streams, nil)
-
-	model, _ := app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
-	app = model.(*App)
-	if app.focus != paneCommand {
-		t.Fatalf("focus = %s, want %s", app.focus, paneCommand)
-	}
-
-	model, _ = app.Update(tea.KeyMsg{Type: tea.KeyDown})
-	app = model.(*App)
-	if command, ok := app.commandPane.SelectedCommand(); !ok || command.ID != "second" {
-		t.Fatalf("selected command = %#v, ok=%v, want second", command, ok)
-	}
-
-	model, _ = app.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	app = model.(*App)
-	if got, want := app.focus, paneCommandOutput; got != want {
-		t.Fatalf("focus = %s, want %s", got, want)
-	}
-	if !app.commandOutputPane.IsOpen() {
-		t.Fatal("expected command output pane to be open")
-	}
-	if got, want := app.commandOutputPane.StreamID(), "cmd-panel:second"; got != want {
-		t.Fatalf("command output stream id = %q, want %q", got, want)
-	}
-	if got, want := streams.ActiveCount(), 1; got != want {
-		t.Fatalf("active stream count = %d, want %d", got, want)
-	}
-	if got, want := app.activeCmd, "first"; got != want {
-		t.Fatalf("active command = %q, want %q", got, want)
-	}
-}
-
-func TestCommandPaneOStartsCommandAsStream(t *testing.T) {
-	cfg := config.Default()
-
-	buf, err := buffer.New(100, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	streams := stream.New(nil, t.TempDir())
-	defer streams.StopAll()
-
-	commands := []detect.Command{
-		{ID: "first", Title: "First", Cmd: "echo first"},
-		{ID: "second", Title: "Second", Cmd: "echo second"},
-	}
-
-	app := NewWithStreams(cfg, "", commands, "first", buf, runner.New(), streams, nil)
-
-	model, _ := app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
-	app = model.(*App)
-	model, _ = app.Update(tea.KeyMsg{Type: tea.KeyDown})
-	app = model.(*App)
-	model, _ = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'o'}})
-	app = model.(*App)
-
-	if got, want := app.focus, paneStreams; got != want {
-		t.Fatalf("focus = %s, want %s", got, want)
-	}
-	if !app.streamsPane.IsOpen() {
-		t.Fatal("expected streams pane to be open")
-	}
-	if got, want := streams.ActiveCount(), 1; got != want {
-		t.Fatalf("active stream count = %d, want %d", got, want)
-	}
-	if _, ok := app.runtimeStreams["cmd-stream:second"]; !ok {
-		t.Fatal("expected runtime command stream to be registered")
 	}
 }
 

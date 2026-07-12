@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -11,26 +12,14 @@ import (
 
 	"github.com/stackriot/iwatch/internal/buffer"
 	"github.com/stackriot/iwatch/internal/config"
-	"github.com/stackriot/iwatch/internal/detect"
 	"github.com/stackriot/iwatch/internal/runner"
 	"github.com/stackriot/iwatch/internal/stream"
-	"github.com/stackriot/iwatch/internal/watch"
 )
 
-const (
-	logShortMemoryLines = 1000
-	gracefulStopTimeout = 30 * time.Second
-)
+const gracefulStopTimeout = 30 * time.Second
 
 func (a *App) renderSidePanes(width, height int) string {
 	var parts []string
-	if a.commandPane.IsOpen() {
-		parts = append(parts, a.commandPane.View(width, height, a.focus == paneCommand))
-	}
-	if a.commandOutputPane.IsOpen() {
-		status, _ := a.streamStatus(a.commandOutputPane.StreamID())
-		parts = append(parts, a.commandOutputPane.View(width, height, a.focus == paneCommandOutput, status, a.streamLines[a.commandOutputPane.StreamID()]))
-	}
 	if a.eventsPane.IsOpen() {
 		parts = append(parts, a.eventsPane.View(width, height, a.focus == paneEvents))
 	}
@@ -50,11 +39,13 @@ func (a *App) logPaneContext() logPaneContext {
 		CommandTitle:  commandTitle,
 		PresetTitle:   preset.Title,
 		ProcessStatus: a.processStatus,
-		WatchStatus:   a.watchStatus,
+		AppStatus:     a.appStatus,
 		StatusDetail:  a.statusDetail,
 		BufferLen:     a.buf.Len(),
 		BufferCap:     a.cfg.BufferLines,
 		StreamCount:   a.streamCount(),
+		BackendURL:    a.backendURL,
+		ViteURL:       a.viteURL,
 	}
 }
 
@@ -63,9 +54,6 @@ func (a *App) quitCmd() tea.Cmd {
 		return a.forceShutdownCmd()
 	}
 	if !a.hasRunningChildren() {
-		if a.cancelWatch != nil {
-			a.cancelWatch()
-		}
 		return tea.Quit
 	}
 	return a.beginShutdown(shutdownQuit)
@@ -81,7 +69,144 @@ func (a *App) bodyHeight() int {
 }
 
 func (a *App) toolbarHeight() int {
-	return max(1, lipgloss.Height(a.logPane.InputBar()))
+	return max(1, lipgloss.Height(a.inputBar()))
+}
+
+func (a *App) inputBar() string {
+	label := "log"
+	value := a.logPane.queryInput.View()
+	if !a.logPane.queryInput.Focused() && a.logPane.query == "" {
+		value = a.logPane.queryInput.Placeholder
+	}
+
+	keys := a.inputBarHints()
+	if a.logPane.queryInput.Focused() {
+		label = "query"
+	} else if a.logPane.selecting && a.mode == modeMain {
+		label = "select"
+	} else if !a.logPane.autoScroll && a.mode == modeMain {
+		label = "log paused"
+	}
+	bar := fmt.Sprintf("%s> %s | %s", label, value, keys)
+	if a.mode == modeMain && a.groupField != "" {
+		bar = fmt.Sprintf("%s | %s", bar, a.groupStatusLabel())
+	}
+	return lipgloss.NewStyle().
+		Padding(0, 1).
+		Background(lipgloss.Color("236")).
+		Foreground(lipgloss.Color("255")).
+		Render(bar)
+}
+
+func (a *App) inputBarHints() string {
+	// Keep this compact; full list via '?'.
+	if a.logPane.queryInput.Focused() {
+		return "[esc/enter] close [?] help"
+	}
+	if a.mode == modeMain && a.logPane.selecting {
+		return "[j/k] move [enter] details [y] share [esc] tail [?] help [q] quit"
+	}
+
+	switch a.mode {
+	case modeConfig:
+		return "[up/down] move [enter] action [e] edit [a] add [d] del [esc] back [?] help"
+	case modeDetail:
+		return "[j/k] scroll [y] share [Y] fields [esc/enter] back [?] help"
+	case modeStream:
+		return "[esc/enter] back [?] help"
+	case modeShare:
+		return "[y] copy [s] export [esc/enter] back [?] help"
+	case modeHelp:
+		return "[esc/?/q] close"
+	case modeFields:
+		return "fields> type filter [space/enter] toggle [esc] close"
+	case modeFieldFilter:
+		if a.filterMenu.Editing() {
+			return "filter value> type [enter] done [esc] back [ctrl+u] clear"
+		}
+		return "field filters> type field [enter] edit [esc] close"
+	case modeGroup:
+		return "group> type filter [space/enter] select [esc] close"
+	}
+
+	// Main mode, focus-aware.
+	switch a.focus {
+	case paneStreams:
+		return "[j/k] move [enter] start/stop [o] modal [tab] focus [?] help"
+	case paneEvents:
+		return "[tab] focus [?] help"
+	default:
+		if a.viteURL != "" {
+			return "[j/k] nav [/] query [,/.] group [b] group field [l] streams [w] events [y] share [O] open [?] help [q] quit"
+		}
+		return "[j/k] nav [/] query [,/.] group [b] group field [l] streams [w] events [y] share [?] help [q] quit"
+	}
+}
+
+func defaultGroupField(cfg config.Config) string {
+	field := strings.ToLower(strings.TrimSpace(cfg.UI.LogView.GroupField))
+	if field == "" {
+		return config.DefaultGroupField
+	}
+	return field
+}
+
+func (a *App) groupCycleValues() []string {
+	if a.groupField == "" {
+		return []string{""}
+	}
+	distinct := a.buf.DistinctFieldValues(a.groupField)
+	values := make([]string, 0, 1+len(distinct))
+	values = append(values, "")
+	values = append(values, distinct...)
+	return values
+}
+
+func (a *App) groupStatusLabel() string {
+	values := a.groupCycleValues()
+	idx := 0
+	for i, value := range values {
+		if value == a.groupValue {
+			idx = i
+			break
+		}
+	}
+	label := "<alle>"
+	if a.groupValue != "" {
+		label = a.groupValue
+	}
+	return fmt.Sprintf("group: %s=%s (%d/%d)", a.groupField, label, idx+1, len(values))
+}
+
+func (a *App) cycleGroupValue(delta int) {
+	values := a.groupCycleValues()
+	if len(values) == 0 {
+		return
+	}
+	current := 0
+	for idx, value := range values {
+		if value == a.groupValue {
+			current = idx
+			break
+		}
+	}
+	next := (current + delta + len(values)) % len(values)
+	a.groupValue = values[next]
+	lines := a.snapshotLines()
+	a.logPane.refreshQueryState(a.logPane.autoScroll, lines)
+	a.syncLogViewport(lines)
+}
+
+func (a *App) setGroupField(field string) {
+	field = strings.ToLower(strings.TrimSpace(field))
+	if field == "" {
+		return
+	}
+	a.groupField = field
+	a.groupValue = ""
+	lines := a.snapshotLines()
+	a.logPane.refreshQueryState(a.logPane.autoScroll, lines)
+	a.syncLogViewport(lines)
 }
 
 func (a *App) openLineDetail() {
@@ -91,6 +216,28 @@ func (a *App) openLineDetail() {
 	}
 	a.detail.Open(line)
 	a.mode = modeDetail
+}
+
+func (a *App) openShare(contents string) {
+	a.share.Open(contents)
+	a.mode = modeShare
+}
+
+func (a *App) openShareForCurrentLine(contextLines int) {
+	lines := a.snapshotLines()
+	line, ok := a.logPane.currentLine(lines)
+	if !ok {
+		return
+	}
+	a.openShare(a.shareBundleForLine(line, lines, contextLines))
+}
+
+func (a *App) openShareForDetail(fieldsOnly bool) {
+	if a.detail == nil || a.detail.line == nil {
+		return
+	}
+	line := *a.detail.line
+	a.openShare(shareBundleForDetailLine(line, a.logPaneContext(), a.logPane.query, a.fieldFilters, a.groupField, a.groupValue, a.cfg, fieldsOnly))
 }
 
 func (a *App) openLineDetailAt(index int, lines []buffer.ViewLine) {
@@ -113,7 +260,7 @@ func (a *App) logPaneWidth() int {
 
 func (a *App) nextPane() paneID {
 	var panes []string
-	for _, pane := range []Pane{a.logPane, a.commandPane, a.commandOutputPane, a.eventsPane, a.streamsPane} {
+	for _, pane := range []Pane{a.logPane, a.eventsPane, a.streamsPane} {
 		if pane.IsOpen() {
 			panes = append(panes, string(pane.ID()))
 		}
@@ -135,14 +282,6 @@ func (a *App) togglePane(id paneID) {
 	switch id {
 	case paneLog:
 		return
-	case paneCommand:
-		a.commandPane.SetOpen(!a.commandPane.IsOpen())
-	case paneCommandOutput:
-		open := !a.commandOutputPane.IsOpen()
-		a.commandOutputPane.SetOpen(open)
-		if !open {
-			a.closeCommandOutputPane()
-		}
 	case paneEvents:
 		a.eventsPane.SetOpen(!a.eventsPane.IsOpen())
 	case paneStreams:
@@ -151,13 +290,6 @@ func (a *App) togglePane(id paneID) {
 }
 
 func (a *App) snapshotLines() []buffer.ViewLine {
-	if a.logWindowLimit <= 0 {
-		a.logWindowLimit = logShortMemoryLines
-	}
-	return a.snapshotLinesWithLimit(a.logWindowLimit)
-}
-
-func (a *App) snapshotLinesWithLimit(limit int) []buffer.ViewLine {
 	preset := activePreset(a.cfg)
 	highlights := preset.HighlightRules
 	if len(highlights) == 0 {
@@ -166,9 +298,9 @@ func (a *App) snapshotLinesWithLimit(limit int) []buffer.ViewLine {
 	return a.buf.Snapshot(buffer.SnapshotOptions{
 		Preset:       preset,
 		Query:        a.logPane.query,
+		Group:        buffer.GroupFilter{Field: a.groupField, Value: a.groupValue},
 		FieldFilters: cloneFieldFilters(a.fieldFilters),
 		Highlights:   highlights,
-		Limit:        limit,
 	})
 }
 
@@ -182,6 +314,121 @@ func (a *App) renderLine(line buffer.ViewLine, width int) string {
 
 func (a *App) renderDetailLines() []string {
 	return a.detail.lines()
+}
+
+func (a *App) shareBundleForLine(line buffer.ViewLine, lines []buffer.ViewLine, contextLines int) string {
+	ctx := a.logPaneContext()
+	preset := activePreset(a.cfg)
+	builder := strings.Builder{}
+	builder.WriteString("iwatch share v1\n")
+	builder.WriteString(fmt.Sprintf("cmd: %s\n", ctx.CommandTitle))
+	builder.WriteString(fmt.Sprintf("preset: %s (%s)\n", preset.ID, preset.Title))
+	builder.WriteString(fmt.Sprintf("query: %s\n", strings.TrimSpace(a.logPane.query)))
+	if len(a.fieldFilters) > 0 {
+		builder.WriteString("fieldFilters:\n")
+		keys := make([]string, 0, len(a.fieldFilters))
+		for key := range a.fieldFilters {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		for _, key := range keys {
+			builder.WriteString(fmt.Sprintf("  - %s contains %q\n", key, a.fieldFilters[key]))
+		}
+	}
+	if a.groupField != "" && a.groupValue != "" {
+		builder.WriteString(fmt.Sprintf("group: %s=%s\n", a.groupField, a.groupValue))
+	}
+	builder.WriteString(fmt.Sprintf("time: %s\n", time.Now().Format(time.RFC3339)))
+	builder.WriteString("\nselected:\n")
+	builder.WriteString(fmt.Sprintf("  source: %s\n", line.Source))
+	builder.WriteString(fmt.Sprintf("  index: %d\n", line.Index))
+	builder.WriteString(fmt.Sprintf("  session: %d\n", line.Session))
+	builder.WriteString(fmt.Sprintf("  ts: %s\n", line.Timestamp.Format(time.RFC3339)))
+	builder.WriteString("  raw: |\n")
+	for _, part := range strings.Split(line.Text, "\n") {
+		builder.WriteString("    " + part + "\n")
+	}
+	if len(line.RawFields) > 0 {
+		builder.WriteString("  fields:\n")
+		keys := make([]string, 0, len(line.RawFields))
+		for key := range line.RawFields {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		for _, key := range keys {
+			builder.WriteString(fmt.Sprintf("    %s: %s\n", key, line.RawFields[key]))
+		}
+	}
+
+	if contextLines > 0 && len(lines) > 0 {
+		builder.WriteString("\ncontext:\n")
+		idx := indexOfViewLine(lines, line)
+		if idx < 0 {
+			idx = 0
+		}
+		start := max(0, idx-contextLines)
+		end := min(len(lines), idx+contextLines+1)
+		for i := start; i < end; i++ {
+			builder.WriteString(fmt.Sprintf("  - [%d] %s: %s\n", lines[i].Index, lines[i].Source, lines[i].Text))
+		}
+	}
+	return builder.String()
+}
+
+func shareBundleForDetailLine(line buffer.ViewLine, ctx logPaneContext, query string, fieldFilters map[string]string, groupField, groupValue string, cfg config.Config, fieldsOnly bool) string {
+	preset := activePreset(cfg)
+	builder := strings.Builder{}
+	builder.WriteString("iwatch share v1\n")
+	builder.WriteString(fmt.Sprintf("cmd: %s\n", ctx.CommandTitle))
+	builder.WriteString(fmt.Sprintf("preset: %s (%s)\n", preset.ID, preset.Title))
+	builder.WriteString(fmt.Sprintf("query: %s\n", strings.TrimSpace(query)))
+	if len(fieldFilters) > 0 {
+		builder.WriteString("fieldFilters:\n")
+		keys := make([]string, 0, len(fieldFilters))
+		for key := range fieldFilters {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		for _, key := range keys {
+			builder.WriteString(fmt.Sprintf("  - %s contains %q\n", key, fieldFilters[key]))
+		}
+	}
+	if groupField != "" && groupValue != "" {
+		builder.WriteString(fmt.Sprintf("group: %s=%s\n", groupField, groupValue))
+	}
+	builder.WriteString(fmt.Sprintf("time: %s\n", time.Now().Format(time.RFC3339)))
+	builder.WriteString("\nselected:\n")
+	builder.WriteString(fmt.Sprintf("  source: %s\n", line.Source))
+	builder.WriteString(fmt.Sprintf("  index: %d\n", line.Index))
+	builder.WriteString(fmt.Sprintf("  session: %d\n", line.Session))
+	builder.WriteString(fmt.Sprintf("  ts: %s\n", line.Timestamp.Format(time.RFC3339)))
+	if !fieldsOnly {
+		builder.WriteString("  raw: |\n")
+		for _, part := range strings.Split(line.Text, "\n") {
+			builder.WriteString("    " + part + "\n")
+		}
+	}
+	if len(line.RawFields) > 0 {
+		builder.WriteString("  fields:\n")
+		keys := make([]string, 0, len(line.RawFields))
+		for key := range line.RawFields {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		for _, key := range keys {
+			builder.WriteString(fmt.Sprintf("    %s: %s\n", key, line.RawFields[key]))
+		}
+	}
+	return builder.String()
+}
+
+func indexOfViewLine(lines []buffer.ViewLine, target buffer.ViewLine) int {
+	for i := range lines {
+		if lines[i].Index == target.Index {
+			return i
+		}
+	}
+	return -1
 }
 
 func (a *App) switchPreset(direction int) {
@@ -199,48 +446,46 @@ func (a *App) switchPreset(direction int) {
 	next := (current + direction + len(ids)) % len(ids)
 	a.cfg.UI.ActivePreset = ids[next]
 	a.applyActiveStreams()
-	a.resetLogWindow()
 	lines := a.snapshotLines()
 	a.logPane.refreshQueryState(true, lines)
 	a.syncLogViewport(lines)
 }
 
 func (a *App) syncLogViewport(lines []buffer.ViewLine) {
-	a.logPane.ensureCursorVisible(max(10, a.logPaneWidth()), a.bodyHeight(), lines, a.buf.ObservedFields(), a.cfg.UI.LogView)
+	width := max(10, a.logPaneWidth())
+	height := a.bodyHeight()
+	observed := a.buf.ObservedFields()
+	view := a.cfg.UI.LogView
+	a.logPane.ensureCursorVisible(width, height, lines, observed, view)
+	a.logPane.pinFrozenViewport(width, height, lines, observed, view)
 }
 
 func (a *App) moveLogCursor(delta int) {
 	lines := a.snapshotLines()
-	if delta < 0 && a.logPane.cursor <= 0 {
-		lines = a.expandLogWindow(lines)
-	}
 	a.logPane.selecting = true
 	a.logPane.moveCursor(delta)
+	a.logPane.bindCursorLine(lines)
 	a.logPane.syncAutoScroll(lines)
 	a.syncLogViewport(lines)
 }
 
 func (a *App) pageLogCursor(direction int) {
 	lines := a.snapshotLines()
-	if direction < 0 && a.logPane.cursor < max(1, a.logPageSize()/2) {
-		lines = a.expandLogWindow(lines)
-	}
 	a.logPane.selecting = true
 	a.logPane.pageCursor(direction, a.logPageSize())
+	a.logPane.bindCursorLine(lines)
 	a.logPane.syncAutoScroll(lines)
 	a.syncLogViewport(lines)
 }
 
 func (a *App) moveLogToTail() {
-	a.resetLogWindow()
 	lines := a.snapshotLines()
-	a.logPane.selecting = false
+	a.logPane.clearSelection()
 	a.logPane.refreshQueryState(true, lines)
 	a.syncLogViewport(lines)
 }
 
 func (a *App) truncateLogs() {
-	a.resetLogWindow()
 	a.buf.Truncate()
 	a.buf.Append("system", "logs truncated")
 	a.moveLogToTail()
@@ -251,32 +496,25 @@ func (a *App) flushPendingOutput() {
 		return
 	}
 	for _, ev := range a.pendingOutput {
-		a.buf.Append(ev.Source, ev.Text)
+		line := a.buf.AppendLine(ev.Source, ev.Text)
+		if a.automations != nil {
+			a.automations.Apply(a, line)
+		}
+		a.observeDevFlow(line)
 	}
 	a.pendingOutput = a.pendingOutput[:0]
-	if a.logPane.autoScroll {
-		a.resetLogWindow()
-	}
+	a.applyLogSnapshot()
+}
+
+func (a *App) applyLogSnapshot() {
 	lines := a.snapshotLines()
 	a.logPane.refreshQueryState(a.logPane.autoScroll, lines)
-	a.syncLogViewport(lines)
-}
-
-func (a *App) resetLogWindow() {
-	a.logWindowLimit = logShortMemoryLines
-}
-
-func (a *App) expandLogWindow(current []buffer.ViewLine) []buffer.ViewLine {
-	if a.logWindowLimit >= a.buf.Len() {
-		return current
+	if a.logPane.autoScroll {
+		a.syncLogViewport(lines)
+		return
 	}
-
-	oldLen := len(current)
-	a.logWindowLimit = min(a.buf.Len(), max(logShortMemoryLines, a.logWindowLimit+logShortMemoryLines))
-	expanded := a.snapshotLines()
-	a.logPane.cursor += max(0, len(expanded)-oldLen)
-	a.logPane.viewportTop += max(0, len(expanded)-oldLen)
-	return expanded
+	a.logPane.maintainPausedViewport(lines)
+	a.syncLogViewport(lines)
 }
 
 func (a *App) switchDraftPreset(direction int) {
@@ -402,9 +640,6 @@ func (a *App) startActiveCommandCmd() tea.Cmd {
 
 func (a *App) beginShutdown(action shutdownAction) tea.Cmd {
 	a.shutdownState = action
-	if a.cancelWatch != nil && action == shutdownQuit {
-		a.cancelWatch()
-	}
 	if a.streams != nil {
 		a.restartStreamIDs = a.streams.RunningIDs()
 	} else {
@@ -413,10 +648,10 @@ func (a *App) beginShutdown(action shutdownAction) tea.Cmd {
 	a.processStatus = "stopping gracefully"
 	switch action {
 	case shutdownQuit:
-		a.watchStatus = "quitting"
+		a.appStatus = "quitting"
 		a.buf.Append("system", "quitting: stopping child processes gracefully (press q again to force)")
 	case shutdownRebuild:
-		a.watchStatus = "rebuilding"
+		a.appStatus = "rebuilding"
 		a.buf.Append("system", "rebuild: stopping child processes gracefully (press r again to force)")
 	}
 	return func() tea.Msg {
@@ -466,7 +701,7 @@ func (a *App) handleShutdownDone(msg shutdownDoneMsg) (tea.Model, tea.Cmd) {
 		return a, tea.Quit
 	}
 
-	a.watchStatus = "clean"
+	a.appStatus = "clean"
 	for _, id := range restartStreamIDs {
 		if err := a.streams.Start(id); err != nil {
 			a.eventsPane.Append(fmt.Sprintf("stream %s restart failed: %v", id, err))
@@ -482,37 +717,11 @@ func waitRunnerEvent(run *runner.Runner) tea.Cmd {
 	}
 }
 
-func waitWatchEvent(w *watch.Watcher) tea.Cmd {
-	return func() tea.Msg {
-		ev, ok := <-w.Events()
-		if !ok {
-			return nil
-		}
-		return watchMsg(ev)
-	}
-}
-
-func waitWatchError(w *watch.Watcher) tea.Cmd {
-	return func() tea.Msg {
-		err, ok := <-w.Errors()
-		if !ok {
-			return nil
-		}
-		return watchErrMsg{err: err}
-	}
-}
-
 func waitStreamEvent(streams *stream.Supervisor) tea.Cmd {
 	return func() tea.Msg {
 		ev := <-streams.Events()
 		return streamMsg(ev)
 	}
-}
-
-func tickCmd() tea.Cmd {
-	return tea.Tick(500*time.Millisecond, func(t time.Time) tea.Msg {
-		return tickMsg(t)
-	})
 }
 
 func outputFlushCmd() tea.Cmd {
@@ -624,76 +833,6 @@ func (a *App) allStreamConfigs() []config.StreamConfig {
 	return streams
 }
 
-func (a *App) startCommandAsStream(command detect.Command, streamID string, title string) {
-	if a.streams == nil {
-		a.eventsPane.Append("command streams unavailable")
-		return
-	}
-	if _, ok := a.runtimeStreams[streamID]; ok {
-		_ = a.streams.Stop(streamID)
-	}
-
-	cfg := config.StreamConfig{
-		ID:        streamID,
-		Title:     title,
-		Type:      "process",
-		Enabled:   boolPtr(true),
-		CWD:       command.CWD,
-		Cmd:       command.Cmd,
-		AutoStart: boolPtr(true),
-	}
-	a.runtimeStreams[streamID] = cfg
-	if !containsString(a.runtimeStreamOrder, streamID) {
-		a.runtimeStreamOrder = append(a.runtimeStreamOrder, streamID)
-	}
-	a.streamLines[streamID] = nil
-	a.applyActiveStreams()
-}
-
-func (a *App) startCommandInStream(command detect.Command) {
-	a.startCommandAsStream(command, "cmd-stream:"+command.ID, command.Title)
-	a.streamsPane.SetOpen(true)
-	a.focus = paneStreams
-}
-
-func (a *App) startCommandInOutputPane(command detect.Command) {
-	streamID := "cmd-panel:" + command.ID
-	if a.commandOutputID != "" && a.commandOutputID != streamID {
-		a.removeRuntimeStream(a.commandOutputID)
-	}
-	a.commandOutputID = streamID
-	a.commandOutputPane.SetCommand(streamID, command.Title)
-	a.commandOutputPane.SetOpen(true)
-	a.startCommandAsStream(command, streamID, command.Title)
-	a.focus = paneCommandOutput
-}
-
-func (a *App) closeCommandOutputPane() {
-	if a.commandOutputID == "" {
-		a.commandOutputPane.Clear()
-		return
-	}
-	a.removeRuntimeStream(a.commandOutputID)
-	a.commandOutputID = ""
-	a.commandOutputPane.Clear()
-	if a.focus == paneCommandOutput {
-		a.focus = paneLog
-	}
-}
-
-func (a *App) removeRuntimeStream(id string) {
-	if id == "" {
-		return
-	}
-	delete(a.runtimeStreams, id)
-	delete(a.streamLines, id)
-	a.runtimeStreamOrder = removeString(a.runtimeStreamOrder, id)
-	if a.streams != nil {
-		_ = a.streams.Stop(id)
-		a.applyActiveStreams()
-	}
-}
-
 func (a *App) openSelectedStreamDetail() {
 	status, ok := a.streamsPane.Selected(a.streamStatuses())
 	if !ok {
@@ -765,17 +904,6 @@ func containsString(values []string, target string) bool {
 		}
 	}
 	return false
-}
-
-func removeString(values []string, target string) []string {
-	out := values[:0]
-	for _, value := range values {
-		if value == target {
-			continue
-		}
-		out = append(out, value)
-	}
-	return out
 }
 
 func min(a, b int) int {
@@ -864,23 +992,24 @@ func parseRule(value string) config.HighlightRule {
 }
 
 func formatStream(stream config.StreamConfig) string {
-	return fmt.Sprintf("%s|%s|%s|%s|%s|%s|%t|%t", stream.ID, stream.Title, stream.Type, stream.Source, stream.Cmd, stream.CWD, boolValue(stream.Enabled), boolValue(stream.AutoStart))
+	return fmt.Sprintf("%s|%s|%s|%s|%s|%s|%s|%t|%t", stream.ID, stream.Title, stream.Type, stream.Role, stream.Source, stream.Cmd, stream.CWD, boolValue(stream.Enabled), boolValue(stream.AutoStart))
 }
 
 func parseStream(value string) config.StreamConfig {
-	parts := strings.SplitN(value, "|", 8)
-	for len(parts) < 8 {
+	parts := strings.SplitN(value, "|", 9)
+	for len(parts) < 9 {
 		parts = append(parts, "")
 	}
-	enabled := parseBoolDefault(parts[6], true)
-	autoStart := parseBoolDefault(parts[7], true)
+	enabled := parseBoolDefault(parts[7], true)
+	autoStart := parseBoolDefault(parts[8], true)
 	return config.StreamConfig{
 		ID:        strings.TrimSpace(parts[0]),
 		Title:     strings.TrimSpace(parts[1]),
 		Type:      strings.TrimSpace(parts[2]),
-		Source:    strings.TrimSpace(parts[3]),
-		Cmd:       strings.TrimSpace(parts[4]),
-		CWD:       strings.TrimSpace(parts[5]),
+		Role:      strings.TrimSpace(parts[3]),
+		Source:    strings.TrimSpace(parts[4]),
+		Cmd:       strings.TrimSpace(parts[5]),
+		CWD:       strings.TrimSpace(parts[6]),
 		Enabled:   boolPtr(enabled),
 		AutoStart: boolPtr(autoStart),
 	}

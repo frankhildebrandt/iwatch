@@ -1,13 +1,12 @@
 # iwatch
 
-`iwatch` ist ein interaktives Watch-Tool fuer Build- und Entwicklungs-Workflows. Es kombiniert automatische Command-Erkennung, Dateisystem-Watching und eine TUI zum Lesen, Filtern und Durchsuchen von Prozess-Output.
+`iwatch` ist eine interaktive Dev-Log-TUI fuer Build- und Entwicklungs-Workflows. Sie kombiniert automatische Command-Erkennung, einen Hauptprozess-Runner und eine Oberflaeche zum Lesen, Filtern und Durchsuchen von Prozess-Output.
 
 ## Features
 
 - Auto-Mode mit Erkennung von `package.json`-Scripts und `Makefile`-Targets
-- Rekursives Watching des aktuellen Pfads oder eines expliziten `--path`
-- Manueller Rebuild-Flow mit sichtbarem `rebuild possible`-Status
-- TUI mit Log-View, Command-Palette, Bottom-Query und Watch-Events
+- Manueller Rebuild des aktiven Commands per `r`
+- TUI mit Log-View, Bottom-Query und Events-Pane fuer Systemmeldungen
 - Zusaetzliche LogStreams fuer Dateien und Hintergrundprozesse, pro Preset aktivierbar
 - Scrollen per Cursor, Live-Filter, logfmt-verstaendige Feldabfragen und Highlight-Regeln
 - Selektierbare Logzeilen mit Detailansicht fuer geparste Felder und pretty printed JSON-Werte
@@ -26,7 +25,6 @@ go build ./cmd/iwatch
 
 ```bash
 iwatch
-iwatch --path ./src
 iwatch --command npm:dev
 iwatch --buffer-lines 200000
 iwatch --config ./.iwatch.config.json
@@ -35,15 +33,15 @@ iwatch --config ./.iwatch.config.json
 ## Keybindings
 
 - `r`: aktives Command stoppen und neu starten
-- `c`: Command-Palette oeffnen oder schliessen
-- `p`: Command-Output-Pane oeffnen oder schliessen
 - `?`: Keymap-Hilfe oeffnen oder schliessen
 - `l`: Streams-Pane oeffnen oder schliessen
 - `/`: Bottom-Query oeffnen
 - `f`: Bottom-Query oeffnen
-- `w`: Watch-Events-Pane oeffnen
+- `w`: Events-Pane oeffnen (Streams, Automations, Config)
 - `v`: Logfeld-Menue oeffnen, per Tippen filtern und erkannte logfmt-Felder ein-/ausblenden
 - `F`: Live-Feldfilter oeffnen, Felder waehlen und per Contains-Wert filtern
+- `b`: Gruppierungsfeld waehlen (Standard: `component`)
+- `,` / `.`: Gruppierungswert vor/zurueck durchschalten (inkl. alle Werte)
 - `g`: Fullscreen-Config-Editor oeffnen
 - `[` / `]` oder `left/right`: zwischen konfigurierten Presets umschalten
 - `tab`: Fokus zwischen offenen Panes wechseln
@@ -51,8 +49,6 @@ iwatch --config ./.iwatch.config.json
 - `pgup/pgdown`, `ctrl+u/ctrl+d`: seitenweise scrollen
 - `home/end`, `G`: an Anfang oder Ende springen
 - `enter`: ans Log-Ende springen oder in der Auswahl die Detailansicht oeffnen
-- `enter` im Commands-Pane: ausgewaehltes Command im Command-Output-Pane starten
-- `o` im Commands-Pane: ausgewaehltes Command als separaten Stream starten
 - `enter` im Streams-Pane: ausgewaehlten on-demand Stream starten oder laufenden Stream stoppen
 - `o` im Streams-Pane: Ausgabe eines einzelnen Streams modal anzeigen
 - `t`: Logbuffer leeren und wieder ans Log-Ende springen
@@ -61,6 +57,9 @@ iwatch --config ./.iwatch.config.json
 - `S`: Split-Richtung wechseln
 - `esc` oder `enter` in der Detailansicht: zurueck zur Logansicht
 - `esc`: Bottom-Query schliessen
+- `y`: Share/Copy der aktuellen Zeile (Agent-friendly Snippet)
+- `Y`: Share/Copy der aktuellen Zeile inkl. Kontext (+/- 20 Zeilen)
+- `O`: erkannte Vite-URL im Browser oeffnen (wenn verfuegbar)
 - `q`: App beenden
 - `esc` dreimal: App beenden
 
@@ -74,6 +73,16 @@ iwatch --config ./.iwatch.config.json
 Die Bottom-Query wirkt zusaetzlich auf das aktive Preset. Strukturierte OR-Filter werden in der Config-Datei ueber Presets gepflegt.
 
 Der Live-Feldfilter unter `F` wirkt nur fuer die laufende Sitzung. Mehrere gesetzte Feldfilter werden mit `AND` kombiniert und matchen case-insensitive per Contains gegen erkannte logfmt-Felder.
+
+Die Gruppierung filtert live nach einem strukturierten Feld (Default `component`, konfigurierbar als `ui.logView.groupField`). `,` und `.` schalten exakte Werte dieses Feldes durch (inkl. „alle“). Das ist getrennt vom Contains-Feldfilter unter `F` und kombiniert sich per `AND` mit Preset, Query und Feldfiltern.
+
+## Structured Logging (logfmt + JSON Lines)
+
+`iwatch` erkennt strukturierte Felder sowohl aus logfmt-aehnlichen `key=value` Tokens als auch aus **JSON Lines** (eine JSON pro Zeile).\n\nBeispiele:\n\n- logfmt:\n  - `level=INFO msg=\"hello\" request_id=abc`\n- JSON Lines:\n  - `{\"level\":\"INFO\",\"msg\":\"hello\",\"http\":{\"port\":8080}}`\n\nNested JSON wird als `dot.path` flach gemacht (z.B. `http.port=8080`) und ist dann im Filter nutzbar.
+
+## Dev-Flow: Go Backend + Vite (Port Handshake)
+
+Wenn du Go-Backend und Vite getrennt startest, kann `iwatch` den Backend-Port/URL aus den Logs erkennen und diese Info an den Vite-Devserver als ENV weitergeben.\n\nEmpfohlen:\n\n- Backend loggt structured `url=...` oder `port=...` (logfmt oder JSON Lines)\n- Vite wird als Stream mit `role: \"vite\"` konfiguriert, Backend als `role: \"backend\"`\n\nMinimal-Beispiel fuer `streams`:\n\n```json\n{\n  \"streams\": [\n    {\n      \"id\": \"backend\",\n      \"title\": \"Go backend\",\n      \"type\": \"process\",\n      \"role\": \"backend\",\n      \"cmd\": \"go run ./cmd/server\",\n      \"autoStart\": true\n    },\n    {\n      \"id\": \"vite\",\n      \"title\": \"Vite dev\",\n      \"type\": \"process\",\n      \"role\": \"vite\",\n      \"cmd\": \"npm run dev\",\n      \"autoStart\": false\n    }\n  ]\n}\n```\n\nSobald `iwatch` eine Backend-URL erkennt, setzt es beim Vite-Stream:\n\n- `BACKEND_URL`\n- `BACKEND_PORT` (wenn ableitbar)\n\nund startet den Vite-Stream (on-demand) automatisch.\n\nWenn `iwatch` die Vite-URL erkennt, kannst du sie mit `O` direkt oeffnen.
 
 ## Config Editor
 
@@ -102,7 +111,6 @@ Beispiel:
 
 ```json
 {
-  "watchPath": "./",
   "bufferLines": 1000000,
   "defaultCommand": "npm:dev",
   "commands": [
@@ -225,4 +233,5 @@ Beispiel:
   In `default` wird die Zeit dunkelgrau, der logfmt-Key hellgrau und der Wert weiss gerendert.
 - `visibleFields`: steuert die bevorzugte Reihenfolge erkannter logfmt-Felder; neue Felder werden automatisch angehaengt
 - `hiddenFields`: blendet erkannte logfmt-Felder aus; das Feld-Menue schreibt diese Liste erst nach explizitem Speichern in die Config
+- `groupField`: Standard-Gruppierungsfeld fuer `b` und `,`/`.` (Default: `component`)
 - Root-`highlightRules` bleiben als Rueckwaertskompatibilitaets-Fallback aktiv, wenn ein Preset keine eigenen Regeln hat

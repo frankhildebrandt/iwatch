@@ -3,7 +3,6 @@ package app
 import (
 	"fmt"
 	"os"
-	"path/filepath"
 
 	"github.com/spf13/cobra"
 
@@ -13,7 +12,6 @@ import (
 	"github.com/stackriot/iwatch/internal/runner"
 	"github.com/stackriot/iwatch/internal/stream"
 	"github.com/stackriot/iwatch/internal/tui"
-	"github.com/stackriot/iwatch/internal/watch"
 )
 
 func Run(args []string) error {
@@ -21,7 +19,7 @@ func Run(args []string) error {
 
 	root := &cobra.Command{
 		Use:   "iwatch",
-		Short: "Interactive watch tool for build and run workflows",
+		Short: "Interactive dev log TUI for build and run workflows",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			wd, err := os.Getwd()
 			if err != nil {
@@ -50,14 +48,6 @@ func Run(args []string) error {
 				discovered.Commands, defaultCommand = resolvePositionalCommand(wd, discovered.Commands, defaultCommand, args)
 			}
 
-			watchPath := cfg.WatchPath
-			if watchPath == "" {
-				watchPath = wd
-			}
-			if !filepath.IsAbs(watchPath) {
-				watchPath = filepath.Join(wd, watchPath)
-			}
-
 			logBuffer, err := buffer.New(cfg.BufferLines, cfg.HighlightRules)
 			if err != nil {
 				return fmt.Errorf("configure buffer: %w", err)
@@ -65,16 +55,11 @@ func Run(args []string) error {
 
 			run := runner.New()
 			streams := stream.New(cfg.Streams, wd)
-			watcher, err := watch.New(watchPath)
-			if err != nil {
-				return fmt.Errorf("start watcher: %w", err)
-			}
 
-			return tui.Run(cfg, projectConfigPath, discovered.Commands, defaultCommand, logBuffer, run, streams, watcher)
+			return tui.Run(cfg, projectConfigPath, discovered.Commands, defaultCommand, logBuffer, run, streams)
 		},
 	}
 
-	root.Flags().StringVar(&overrides.WatchPath, "path", "", "Path to watch instead of the current working directory")
 	root.Flags().StringVar(&overrides.ConfigPath, "config", "", "Explicit config file to load")
 	root.Flags().IntVar(&overrides.BufferLines, "buffer-lines", 0, "Maximum number of log lines to keep")
 	root.Flags().StringVar(&overrides.CommandID, "command", "", "Command ID to start immediately")

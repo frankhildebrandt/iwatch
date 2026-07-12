@@ -4,13 +4,13 @@ import (
 	"strings"
 )
 
-// EventsPane keeps the recent watch event lines.
+// EventsPane keeps recent system event lines.
 type EventsPane struct {
 	open   bool
 	events []string
 }
 
-// NewEventsPane creates the watch events pane.
+// NewEventsPane creates the system events pane.
 func NewEventsPane(openPanes []string) *EventsPane {
 	pane := &EventsPane{}
 	for _, paneName := range openPanes {
@@ -42,11 +42,11 @@ func (p *EventsPane) Append(value string) {
 	p.events = appendTrimmed(p.events, value, 200)
 }
 
-// View renders the watch events pane.
+// View renders the system events pane.
 func (p *EventsPane) View(width, height int, focused bool) string {
 	events := strings.Join(lastN(p.events, max(3, height/3-2)), "\n")
 	if events == "" {
-		events = "No watch events yet."
+		events = "No system events yet."
 	}
-	return paneStyle(focused, width, max(5, height/3)).Render("Watch events\n" + events)
+	return paneStyle(focused, width, max(5, height/3)).Render("Events\n" + events)
 }

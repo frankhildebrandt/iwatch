@@ -16,11 +16,12 @@ const (
 	DefaultPresetID = "default"
 	// DefaultLogPalette is the fallback color palette for structural log text.
 	DefaultLogPalette = "default"
+	// DefaultGroupField is the default structured-log field used for grouping.
+	DefaultGroupField = "component"
 )
 
 // Config contains the persisted app configuration.
 type Config struct {
-	WatchPath      string          `json:"watchPath"`
 	BufferLines    int             `json:"bufferLines"`
 	DefaultCommand string          `json:"defaultCommand"`
 	Commands       []CommandConfig `json:"commands"`
@@ -43,11 +44,13 @@ type StreamConfig struct {
 	ID        string `json:"id"`
 	Title     string `json:"title"`
 	Type      string `json:"type"`
+	Role      string `json:"role,omitempty"`
 	Enabled   *bool  `json:"enabled,omitempty"`
 	Source    string `json:"source,omitempty"`
 	CWD       string `json:"cwd,omitempty"`
 	Cmd       string `json:"cmd,omitempty"`
 	AutoStart *bool  `json:"autoStart,omitempty"`
+	Env       map[string]string `json:"env,omitempty"`
 }
 
 // HighlightRule configures a regex-based highlight style.
@@ -88,6 +91,7 @@ type LogViewConfig struct {
 	TimeFormat     string   `json:"timeFormat,omitempty"`
 	WrapMode       string   `json:"wrapMode,omitempty"`
 	Palette        string   `json:"palette,omitempty"`
+	GroupField     string   `json:"groupField,omitempty"`
 }
 
 // UIConfig contains TUI layout and preset settings.
@@ -97,13 +101,13 @@ type UIConfig struct {
 	FocusPane      string         `json:"focusPane"`
 	ActivePreset   string         `json:"activePreset,omitempty"`
 	Presets        []FilterPreset `json:"presets,omitempty"`
+	Automations    []AutomationConfig `json:"automations,omitempty"`
 	LogView        LogViewConfig  `json:"logView"`
 }
 
 // CLIOverrides contains command-line configuration overrides.
 type CLIOverrides struct {
 	ConfigPath  string
-	WatchPath   string
 	BufferLines int
 	CommandID   string
 }
@@ -163,9 +167,6 @@ func ResolveConfig(baseDir string, overrides CLIOverrides) (Config, string, erro
 		usedPath = path
 	}
 
-	if overrides.WatchPath != "" {
-		cfg.WatchPath = overrides.WatchPath
-	}
 	if overrides.BufferLines > 0 {
 		cfg.BufferLines = overrides.BufferLines
 	}
@@ -238,6 +239,12 @@ func Clone(cfg Config) Config {
 		if cfg.Streams[idx].AutoStart != nil {
 			out.Streams[idx].AutoStart = boolPtr(*cfg.Streams[idx].AutoStart)
 		}
+		if cfg.Streams[idx].Env != nil {
+			out.Streams[idx].Env = make(map[string]string, len(cfg.Streams[idx].Env))
+			for k, v := range cfg.Streams[idx].Env {
+				out.Streams[idx].Env[k] = v
+			}
+		}
 	}
 	out.HighlightRules = append([]HighlightRule(nil), cfg.HighlightRules...)
 	out.UI.OpenPanes = append([]string(nil), cfg.UI.OpenPanes...)
@@ -254,6 +261,8 @@ func Clone(cfg Config) Config {
 	}
 	out.UI.LogView.VisibleFields = append([]string(nil), cfg.UI.LogView.VisibleFields...)
 	out.UI.LogView.HiddenFields = append([]string(nil), cfg.UI.LogView.HiddenFields...)
+	out.UI.Automations = make([]AutomationConfig, len(cfg.UI.Automations))
+	copy(out.UI.Automations, cfg.UI.Automations)
 	if cfg.UI.LogView.ShowRawMessage != nil {
 		out.UI.LogView.ShowRawMessage = boolPtr(*cfg.UI.LogView.ShowRawMessage)
 	}
@@ -301,9 +310,6 @@ func loadFile(path string) (Config, bool, error) {
 
 func merge(base, override Config) Config {
 	out := base
-	if override.WatchPath != "" {
-		out.WatchPath = override.WatchPath
-	}
 	if override.BufferLines > 0 {
 		out.BufferLines = override.BufferLines
 	}
@@ -334,6 +340,9 @@ func merge(base, override Config) Config {
 	if override.UI.Presets != nil {
 		out.UI.Presets = override.UI.Presets
 	}
+	if override.UI.Automations != nil {
+		out.UI.Automations = override.UI.Automations
+	}
 	if override.UI.LogView.VisibleFields != nil {
 		out.UI.LogView.VisibleFields = normalizeFieldNames(override.UI.LogView.VisibleFields)
 	}
@@ -357,6 +366,9 @@ func merge(base, override Config) Config {
 	}
 	if override.UI.LogView.Palette != "" {
 		out.UI.LogView.Palette = override.UI.LogView.Palette
+	}
+	if override.UI.LogView.GroupField != "" {
+		out.UI.LogView.GroupField = strings.ToLower(strings.TrimSpace(override.UI.LogView.GroupField))
 	}
 	return out
 }
@@ -389,6 +401,10 @@ func normalize(cfg Config) Config {
 	}
 	cfg.UI.LogView.VisibleFields = normalizeFieldNames(cfg.UI.LogView.VisibleFields)
 	cfg.UI.LogView.HiddenFields = normalizeFieldNames(cfg.UI.LogView.HiddenFields)
+	cfg.UI.LogView.GroupField = strings.ToLower(strings.TrimSpace(cfg.UI.LogView.GroupField))
+	if cfg.UI.LogView.GroupField == "" {
+		cfg.UI.LogView.GroupField = DefaultGroupField
+	}
 	if cfg.UI.LogView.ShowRawMessage == nil {
 		cfg.UI.LogView.ShowRawMessage = boolPtr(true)
 	}
@@ -403,10 +419,36 @@ func normalize(cfg Config) Config {
 		cfg.UI.LogView.ShowTimestamp = boolPtr(true)
 	}
 	cfg.UI.Presets = normalizePresets(cfg.UI.Presets)
+	cfg.UI.Automations = normalizeAutomations(cfg.UI.Automations)
 	if !presetExists(cfg.UI.Presets, cfg.UI.ActivePreset) {
 		cfg.UI.ActivePreset = cfg.UI.Presets[0].ID
 	}
 	return cfg
+}
+
+func normalizeAutomations(values []AutomationConfig) []AutomationConfig {
+	if len(values) == 0 {
+		return nil
+	}
+	out := make([]AutomationConfig, 0, len(values))
+	seen := map[string]int{}
+	for idx, a := range values {
+		a.ID = strings.TrimSpace(a.ID)
+		a.Trigger = strings.TrimSpace(a.Trigger)
+		a.Regex = strings.TrimSpace(a.Regex)
+		if a.ID == "" {
+			a.ID = fmt.Sprintf("automation-%d", idx+1)
+		}
+		if n, ok := seen[a.ID]; ok {
+			n++
+			seen[a.ID] = n
+			a.ID = fmt.Sprintf("%s-%d", a.ID, n)
+		} else {
+			seen[a.ID] = 1
+		}
+		out = append(out, a)
+	}
+	return out
 }
 
 func isLogPalette(name string) bool {
@@ -455,9 +497,11 @@ func normalizeStreams(streams []StreamConfig) []StreamConfig {
 		stream.ID = strings.TrimSpace(stream.ID)
 		stream.Title = strings.TrimSpace(stream.Title)
 		stream.Type = strings.ToLower(strings.TrimSpace(stream.Type))
+		stream.Role = strings.ToLower(strings.TrimSpace(stream.Role))
 		stream.Source = strings.TrimSpace(stream.Source)
 		stream.CWD = strings.TrimSpace(stream.CWD)
 		stream.Cmd = strings.TrimSpace(stream.Cmd)
+		stream.Env = normalizeEnv(stream.Env)
 		if stream.ID == "" {
 			stream.ID = fmt.Sprintf("stream-%d", idx+1)
 		}
@@ -484,6 +528,24 @@ func normalizeStreams(streams []StreamConfig) []StreamConfig {
 			seen[stream.ID] = 1
 		}
 		out = append(out, stream)
+	}
+	return out
+}
+
+func normalizeEnv(env map[string]string) map[string]string {
+	if len(env) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(env))
+	for k, v := range env {
+		k = strings.TrimSpace(k)
+		if k == "" {
+			continue
+		}
+		out[k] = strings.TrimSpace(v)
+	}
+	if len(out) == 0 {
+		return nil
 	}
 	return out
 }

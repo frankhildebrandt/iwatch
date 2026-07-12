@@ -16,6 +16,9 @@ func (a *App) activateEditorRow(row editorRow) (tea.Model, tea.Cmd) {
 			return a, nil
 		}
 		a.cfg = a.editor.draft
+		if a.automations != nil {
+			a.automations.Configure(a.cfg.UI.Automations)
+		}
 		a.applyActiveStreams()
 		a.mode = modeMain
 		a.eventsPane.Append("saved config to " + a.configPath)
@@ -37,7 +40,7 @@ func (a *App) activateEditorRow(row editorRow) (tea.Model, tea.Cmd) {
 		active := activePresetPtr(&a.editor.draft)
 		active.HighlightRules = append(active.HighlightRules, config.HighlightRule{ID: "rule", Style: "warn", Priority: 50, Pattern: "(?i)warn"})
 	case editorStreamAdd:
-		a.editor.draft.Streams = append(a.editor.draft.Streams, config.StreamConfig{ID: "stream", Title: "Stream", Type: "file", Source: "app.log"})
+		a.editor.draft.Streams = append(a.editor.draft.Streams, config.StreamConfig{ID: "stream", Title: "Stream", Type: "file", Source: "app.log", Role: ""})
 	case editorToggleRaw:
 		a.editor.draft.UI.LogView.ShowRawMessage = boolPtr(!boolValue(a.editor.draft.UI.LogView.ShowRawMessage))
 	case editorToggleSource:
@@ -126,7 +129,7 @@ func (a *App) addEditorItem(row editorRow) (tea.Model, tea.Cmd) {
 		active := activePresetPtr(&a.editor.draft)
 		active.HighlightRules = append(active.HighlightRules, config.HighlightRule{ID: "rule", Style: "warn", Priority: 50, Pattern: "(?i)warn"})
 	case editorStream, editorStreamAdd:
-		a.editor.draft.Streams = append(a.editor.draft.Streams, config.StreamConfig{ID: "stream", Title: "Stream", Type: "file", Source: "app.log"})
+		a.editor.draft.Streams = append(a.editor.draft.Streams, config.StreamConfig{ID: "stream", Title: "Stream", Type: "file", Source: "app.log", Role: ""})
 	}
 	a.editor.draft = config.DefaultMerge(a.editor.draft)
 	return a, nil

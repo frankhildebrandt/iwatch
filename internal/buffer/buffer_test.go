@@ -1,6 +1,8 @@
 package buffer
 
 import (
+	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/stackriot/iwatch/internal/config"
@@ -66,7 +68,7 @@ func TestTruncateClearsLinesAndKeepsObservedFields(t *testing.T) {
 	}
 }
 
-func TestSnapshotLimitReturnsLastMatchingLines(t *testing.T) {
+func TestSnapshotFilterReturnsAllMatchingLines(t *testing.T) {
 	buf, err := New(10, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -80,12 +82,15 @@ func TestSnapshotLimitReturnsLastMatchingLines(t *testing.T) {
 		buf.Append("stdout", line)
 	}
 
-	lines := buf.Snapshot(SnapshotOptions{Query: "level=error", Limit: 1})
-	if len(lines) != 1 {
+	lines := buf.Snapshot(SnapshotOptions{Query: "level=error"})
+	if len(lines) != 2 {
 		t.Fatalf("len = %d", len(lines))
 	}
-	if got := lines[0].RawFields["msg"]; got != "four" {
-		t.Fatalf("msg = %q, want four", got)
+	if got := lines[0].RawFields["msg"]; got != "two" {
+		t.Fatalf("first msg = %q, want two", got)
+	}
+	if got := lines[1].RawFields["msg"]; got != "four" {
+		t.Fatalf("last msg = %q, want four", got)
 	}
 }
 
@@ -149,6 +154,77 @@ func TestLogfmtFieldFilters(t *testing.T) {
 	}
 	if got := lines[0].Fields["lua-manager.resource"]; got != "thread-example" {
 		t.Fatalf("unexpected resource field: %q", got)
+	}
+}
+
+func TestJSONLinesParseAndFilter(t *testing.T) {
+	buf, err := New(10, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	buf.Append("stdout", `{"level":"INFO","msg":"hello","http":{"port":8080}}`)
+	buf.Append("stdout", `{"level":"ERROR","msg":"bad","url":"http://127.0.0.1:5173"}`)
+
+	lines := buf.Snapshot(SnapshotOptions{Query: "level=error"})
+	if len(lines) != 1 {
+		t.Fatalf("len = %d", len(lines))
+	}
+	if got := lines[0].RawFields["url"]; got != "http://127.0.0.1:5173" {
+		t.Fatalf("url = %q", got)
+	}
+	if got := lines[0].RawFields["level"]; got != "ERROR" {
+		t.Fatalf("level = %q", got)
+	}
+
+	lines = buf.Snapshot(SnapshotOptions{Query: "http.port=8080"})
+	if len(lines) != 1 {
+		t.Fatalf("len = %d", len(lines))
+	}
+	if got := lines[0].RawFields["http.port"]; got != "8080" {
+		t.Fatalf("http.port = %q", got)
+	}
+}
+
+func TestSourceFilterMatchesSourceKey(t *testing.T) {
+	buf, err := New(10, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	buf.Append("vite:stdout", `msg="hi"`)
+	buf.Append("backend:stdout", `msg="hi"`)
+
+	lines := buf.Snapshot(SnapshotOptions{Query: "source=vite"})
+	if len(lines) != 1 {
+		t.Fatalf("len = %d", len(lines))
+	}
+	if got := lines[0].Source; got != "vite:stdout" {
+		t.Fatalf("source = %q", got)
+	}
+}
+
+func TestJSONLinesRespectsKeyLimit(t *testing.T) {
+	buf, err := New(10, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var b strings.Builder
+	b.WriteString("{")
+	for i := 0; i < 350; i++ {
+		if i > 0 {
+			b.WriteString(",")
+		}
+		b.WriteString(fmt.Sprintf("\"k%03d\":\"v\"", i))
+	}
+	b.WriteString("}")
+	buf.Append("stdout", b.String())
+
+	lines := buf.Snapshot(SnapshotOptions{})
+	if len(lines) != 1 {
+		t.Fatalf("len = %d", len(lines))
+	}
+	if got := len(lines[0].RawFields); got > 200 {
+		t.Fatalf("raw fields = %d, want <= 200", got)
 	}
 }
 
@@ -331,5 +407,193 @@ func TestLogfmtFieldParsingHandlesEscapedQuotedValues(t *testing.T) {
 	}
 	if got := lines[0].Fields["path"]; got != "/tmp/demo folder" {
 		t.Fatalf("unexpected path field: %q", got)
+	}
+}
+
+func TestDistinctFieldValuesReturnsSortedUniqueValues(t *testing.T) {
+	buf, err := New(10, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	buf.Append("stdout", `component=worker level=INFO`)
+	buf.Append("stdout", `component=api level=ERROR`)
+	buf.Append("stdout", `component=api level=INFO`)
+	buf.Append("stdout", `level=WARN`)
+
+	got := buf.DistinctFieldValues("component")
+	if len(got) != 2 || got[0] != "api" || got[1] != "worker" {
+		t.Fatalf("DistinctFieldValues(component) = %#v", got)
+	}
+	if got := buf.DistinctFieldValues(""); got != nil {
+		t.Fatalf("DistinctFieldValues(\"\") = %#v, want nil", got)
+	}
+}
+
+func TestSnapshotGroupFilterExactMatch(t *testing.T) {
+	buf, err := New(10, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	buf.Append("stdout", `component=api level=INFO`)
+	buf.Append("stdout", `component=worker level=ERROR`)
+	buf.Append("stdout", `level=ERROR`)
+
+	lines := buf.Snapshot(SnapshotOptions{
+		Group: GroupFilter{Field: "component", Value: "api"},
+	})
+	if len(lines) != 1 {
+		t.Fatalf("len = %d, want 1", len(lines))
+	}
+	if got := lines[0].Fields["component"]; got != "api" {
+		t.Fatalf("component = %q", got)
+	}
+}
+
+func TestSnapshotGroupFilterExcludesLinesWithoutField(t *testing.T) {
+	buf, err := New(10, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	buf.Append("stdout", `component=api`)
+	buf.Append("stdout", `level=INFO`)
+
+	lines := buf.Snapshot(SnapshotOptions{
+		Group: GroupFilter{Field: "component", Value: "api"},
+	})
+	if len(lines) != 1 {
+		t.Fatalf("len = %d, want 1", len(lines))
+	}
+}
+
+func TestSnapshotGroupFilterEmptyValueShowsAll(t *testing.T) {
+	buf, err := New(10, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	buf.Append("stdout", `component=api`)
+	buf.Append("stdout", `component=worker`)
+
+	lines := buf.Snapshot(SnapshotOptions{
+		Group: GroupFilter{Field: "component", Value: ""},
+	})
+	if len(lines) != 2 {
+		t.Fatalf("len = %d, want 2", len(lines))
+	}
+}
+
+func TestSnapshotIncrementalUpdateAfterAppend(t *testing.T) {
+	buf, err := New(10, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	buf.Append("stdout", `level=INFO msg="one"`)
+	first := buf.Snapshot(SnapshotOptions{Query: "level=info"})
+	if len(first) != 1 {
+		t.Fatalf("initial len = %d", len(first))
+	}
+
+	buf.Append("stdout", `level=INFO msg="two"`)
+	second := buf.Snapshot(SnapshotOptions{Query: "level=info"})
+	if len(second) != 2 {
+		t.Fatalf("len after append = %d", len(second))
+	}
+	if got := second[1].RawFields["msg"]; got != "two" {
+		t.Fatalf("last msg = %q", got)
+	}
+	if first[0].Index != second[0].Index {
+		t.Fatalf("first line index changed: first=%d second=%d", first[0].Index, second[0].Index)
+	}
+}
+
+func TestSnapshotIncrementalEvictionRemovesFilteredLine(t *testing.T) {
+	buf, err := New(2, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	buf.Append("stdout", `level=INFO msg="one"`)
+	buf.Append("stdout", `level=ERROR msg="two"`)
+	lines := buf.Snapshot(SnapshotOptions{Query: "level=info"})
+	if len(lines) != 1 || lines[0].RawFields["msg"] != "one" {
+		t.Fatalf("initial snapshot = %+v", lines)
+	}
+
+	buf.Append("stdout", `level=INFO msg="three"`)
+	lines = buf.Snapshot(SnapshotOptions{Query: "level=info"})
+	if len(lines) != 1 {
+		t.Fatalf("len after eviction = %d, want 1", len(lines))
+	}
+	if got := lines[0].RawFields["msg"]; got != "three" {
+		t.Fatalf("msg = %q, want three", got)
+	}
+}
+
+func TestSnapshotFilterChangeRebuildsCache(t *testing.T) {
+	buf, err := New(10, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	buf.Append("stdout", `level=INFO msg="one"`)
+	buf.Append("stdout", `level=ERROR msg="two"`)
+
+	info := buf.Snapshot(SnapshotOptions{Query: "level=info"})
+	if len(info) != 1 {
+		t.Fatalf("info len = %d", len(info))
+	}
+	errLines := buf.Snapshot(SnapshotOptions{Query: "level=error"})
+	if len(errLines) != 1 {
+		t.Fatalf("error len = %d", len(errLines))
+	}
+	if got := errLines[0].RawFields["msg"]; got != "two" {
+		t.Fatalf("error msg = %q", got)
+	}
+}
+
+func TestSnapshotLinePositionTracksFilteredLines(t *testing.T) {
+	buf, err := New(10, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	line := buf.AppendLine("stdout", `level=INFO msg="one"`)
+	buf.Append("stdout", `level=ERROR msg="two"`)
+
+	_ = buf.Snapshot(SnapshotOptions{Query: "level=info"})
+	pos, ok := buf.SnapshotLinePosition(line.Index)
+	if !ok || pos != 0 {
+		t.Fatalf("SnapshotLinePosition() = (%d, %v), want (0, true)", pos, ok)
+	}
+	if _, ok := buf.SnapshotLinePosition(line.Index + 1); ok {
+		t.Fatal("expected filtered-out line to be missing from snapshot index")
+	}
+}
+
+func TestDistinctFieldValuesUpdatesOnEviction(t *testing.T) {
+	buf, err := New(2, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	buf.Append("stdout", `component=worker level=INFO`)
+	buf.Append("stdout", `component=api level=ERROR`)
+	got := buf.DistinctFieldValues("component")
+	if len(got) != 2 {
+		t.Fatalf("DistinctFieldValues() = %#v", got)
+	}
+
+	buf.Append("stdout", `component=api level=INFO`)
+	got = buf.DistinctFieldValues("component")
+	if len(got) != 1 || got[0] != "api" {
+		t.Fatalf("DistinctFieldValues() after eviction = %#v, want [api]", got)
+	}
+}
+
+func TestDistinctFieldValuesClearsOnTruncate(t *testing.T) {
+	buf, err := New(10, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	buf.Append("stdout", `component=api`)
+	buf.Truncate()
+
+	if got := buf.DistinctFieldValues("component"); len(got) != 0 {
+		t.Fatalf("DistinctFieldValues() after Truncate() = %#v, want empty", got)
 	}
 }
